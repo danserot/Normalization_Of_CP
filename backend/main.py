@@ -26,7 +26,7 @@ app.add_middleware(
 
 def extract_pdf(path: str) -> str:
     document = fitz.open(path)
-    text = "\n\n".join(page.get_text("text") for page in document).strip()
+    text = "\n".join(page.get_text("text") for page in document).strip()
     document.close()
     return text
 
@@ -34,7 +34,8 @@ def extract_pdf(path: str) -> str:
 def extract_docx(path: str) -> str:
     document = Document(path)
     parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-    for table in document.tables:
+    for table_index, table in enumerate(document.tables, start=1):
+        parts.append(f"[ТАБЛИЦА {table_index}]")
         for row in table.rows:
             parts.append("\t".join(cell.text.strip() for cell in row.cells))
     return "\n".join(parts).strip()
@@ -61,19 +62,70 @@ def response_json(content: str) -> dict:
     return value
 
 
+def number(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    normalized = re.sub(r"[^\d,.\-]", "", str(value or "")).replace(",", ".")
+    try:
+        return float(normalized)
+    except ValueError:
+        return 0
+
+
+def normalize_proposal(value: dict, source_text: str) -> dict:
+    items = value.get("items")
+    normalized_items = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            normalized_items.append(
+                {
+                    "name": name,
+                    "quantity": number(item.get("quantity")) or 1,
+                    "unit": str(item.get("unit") or "шт.").strip(),
+                    "unitPrice": number(item.get("unitPrice")),
+                }
+            )
+    return {
+        "title": str(value.get("title") or "").strip(),
+        "client": str(value.get("client") or "").strip(),
+        "clientContact": str(value.get("clientContact") or "").strip(),
+        "validUntil": str(value.get("validUntil") or "").strip(),
+        "notes": source_text,
+        "items": normalized_items,
+    }
+
+
 async def extract_with_qwen(text: str, source_name: str) -> dict:
-    prompt = """Извлеки данные коммерческого предложения из текста.
-Верни ТОЛЬКО валидный JSON без markdown и дополнительных пояснений:
+    prompt = """Ты извлекаешь данные из коммерческого предложения. Это задача строгого копирования, а не заполнения шаблона.
+Используй только значения, которые явно есть в исходном тексте. Ничего не придумывай, не исправляй и не пересчитывай.
+Не считай номер документа, год, ИНН, телефон или дату количеством/ценой товара.
+Не объединяй соседние строки в одну позицию.
+
+Верни ТОЛЬКО валидный JSON следующей формы:
 {
-  "title": "string",
-  "client": "string",
-  "clientContact": "string",
-  "validUntil": "string",
-  "notes": "полный исходный текст",
-  "items": [{"name": "string", "quantity": 0, "unit": "string", "unitPrice": 0}]
+  "title": "",
+  "client": "",
+  "clientContact": "",
+  "validUntil": "",
+  "items": [
+    {"name": "", "quantity": 0, "unit": "", "unitPrice": 0}
+  ]
 }
-Не придумывай значения. Если поле не найдено, верни пустую строку, для items верни [].
-Числа quantity и unitPrice должны быть числами без валютных символов."""
+Правила:
+- Если поле не найдено или есть сомнение, оставь пустую строку.
+- Если таблица товаров не распознана однозначно, верни items: [].
+- quantity и unitPrice должны быть числами. Не найденное число — 0.
+- title — заголовок документа, а не название первой услуги.
+- client — значение после Клиент/Заказчик/Покупатель/Организация.
+- clientContact — телефон, email или контактное лицо, только если они явно подписаны.
+- validUntil — только срок действия предложения.
+- В items включай только реальные товарные/услужные строки, не заголовки и не итоги.
+- Не добавляй поле notes: исходный текст добавит сервер."""
     async with httpx.AsyncClient(timeout=180) as client:
         try:
             response = await client.post(
@@ -82,7 +134,13 @@ async def extract_with_qwen(text: str, source_name: str) -> dict:
                     "model": OLLAMA_MODEL,
                     "stream": False,
                     "format": "json",
-                    "messages": [{"role": "user", "content": f"{prompt}\n\nФайл: {source_name}\n\n{text}"}],
+                    "options": {"temperature": 0, "num_ctx": 16384},
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"{prompt}\n\nИМЯ ФАЙЛА: {source_name}\n\nИСХОДНЫЙ ТЕКСТ:\n{text}",
+                        }
+                    ],
                 },
             )
             response.raise_for_status()
@@ -92,7 +150,10 @@ async def extract_with_qwen(text: str, source_name: str) -> dict:
                 detail=f"Ollama недоступна. Запустите модель {OLLAMA_MODEL}",
             ) from error
     payload = response.json()
-    return response_json(payload.get("message", {}).get("content", ""))
+    return normalize_proposal(
+        response_json(payload.get("message", {}).get("content", "")),
+        text,
+    )
 
 
 @app.post("/api/extract")
@@ -120,8 +181,11 @@ async def extract(file: UploadFile = File(...)) -> dict:
                 "sourceName": file.filename,
                 "parser": f"Qwen2.5-VL-7B/{suffix[1:].upper()}",
                 "status": "parsed",
-                "confidence": 0.9,
-                "warnings": ["Проверьте данные перед подтверждением"],
+                "confidence": 0.9 if proposal["items"] and proposal["client"] else 0.7,
+                "warnings": [
+                    "Проверьте данные перед подтверждением",
+                    *([] if proposal["items"] else ["Позиции не распознаны однозначно"]),
+                ],
             },
         }
     except HTTPException:

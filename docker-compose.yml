@@ -29,8 +29,9 @@ services:
       - "11434:11434"
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
+    entrypoint: ["/bin/sh", "-c"]
     command: >
-      sh -c "ollama serve &
+      "ollama serve &
       pid=$$!;
       until ollama list >/dev/null 2>&1; do sleep 2; done;
       ollama pull qwen2.5vl:7b;
