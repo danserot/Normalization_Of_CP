@@ -13,6 +13,7 @@ const fallbackModels: ExtractionModel[] = [
   { id: 'gemma3:4b', name: 'Gemma 3 4B', description: 'Быстрая мультиязычная проверка полей', size: '≈3.3 ГБ' },
   { id: 'granite3.2-vision:2b', name: 'Granite Vision 2B', description: 'Компактная модель для таблиц и документов', size: '≈2.4 ГБ' },
 ]
+const defaultComparisonModels = ['gemma3:4b', 'granite3.2-vision:2b']
 async function mapWithLimit<T, R>(items: T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
   let cursor = 0
@@ -75,7 +76,7 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [models, setModels] = useState<ExtractionModel[]>(fallbackModels)
   const [selectionMode, setSelectionMode] = useState<'single' | 'compare'>('compare')
-  const [selectedModels, setSelectedModels] = useState<string[]>(fallbackModels.map(({ id }) => id))
+  const [selectedModels, setSelectedModels] = useState<string[]>(defaultComparisonModels)
   const inputRef = useRef<HTMLInputElement>(null)
   const submissionKey = useRef(crypto.randomUUID())
   useEffect(() => {
@@ -113,7 +114,11 @@ function App() {
     setSelectionMode(mode)
     setSelectedModels((current) => mode === 'single'
       ? [current[0] ?? models[0].id]
-      : Array.from(new Set([current[0] ?? models[0].id, ...models.map(({ id }) => id)])).slice(0, 4))
+      : Array.from(new Set([
+          current[0] ?? models[0].id,
+          ...models.filter(({ id }) => defaultComparisonModels.includes(id)).map(({ id }) => id),
+          ...models.map(({ id }) => id),
+        ])).slice(0, 2))
   }
   const toggleModel = (modelId: string) => {
     setSelectedModels((current) => {
