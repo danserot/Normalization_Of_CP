@@ -8,12 +8,9 @@ import './App.css'
 
 type Upload = { file: File; proposal: Partial<CommercialProposal>; metadata: ExtractionMetadata; error?: string }
 const fallbackModels: ExtractionModel[] = [
-  { id: 'qwen3-vl:8b', name: 'Qwen3-VL 8B', description: 'Основная модель: таблицы, русский текст и сложные документы', size: '≈6.1 ГБ', recommended: true },
-  { id: 'minicpm-v4.5:8b', name: 'MiniCPM-V 4.5 8B', description: 'Сильна в OCR, мелком тексте и разборе PDF', size: '≈6.1 ГБ' },
-  { id: 'gemma3:4b', name: 'Gemma 3 4B', description: 'Быстрая мультиязычная проверка полей', size: '≈3.3 ГБ' },
-  { id: 'granite3.2-vision:2b', name: 'Granite Vision 2B', description: 'Компактная модель для таблиц и документов', size: '≈2.4 ГБ' },
+  { id: 'qwen2.5:3b', name: 'Qwen 2.5 3B', description: 'Компактная text-модель для русского текста, таблиц и JSON', size: '≈1.9 ГБ', recommended: true },
 ]
-const defaultComparisonModels = ['gemma3:4b', 'granite3.2-vision:2b']
+const defaultComparisonModels = ['qwen2.5:3b']
 async function mapWithLimit<T, R>(items: T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
   let cursor = 0
@@ -75,8 +72,8 @@ function App() {
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
   const [models, setModels] = useState<ExtractionModel[]>(fallbackModels)
-  const [selectionMode, setSelectionMode] = useState<'single' | 'compare'>('compare')
-  const [selectedModels, setSelectedModels] = useState<string[]>(defaultComparisonModels)
+  const [selectionMode, setSelectionMode] = useState<'single' | 'compare'>('single')
+  const [selectedModels, setSelectedModels] = useState<string[]>(['qwen2.5:3b'])
   const inputRef = useRef<HTMLInputElement>(null)
   const submissionKey = useRef(crypto.randomUUID())
   useEffect(() => {
@@ -136,7 +133,7 @@ function App() {
     setSaved(null)
     submissionKey.current = crypto.randomUUID()
     try {
-      const results = await mapWithLimit(acceptable, 2, async ({ file, error: sizeError }): Promise<Upload> => {
+      const results = await mapWithLimit(acceptable, 1, async ({ file, error: sizeError }): Promise<Upload> => {
         if (sizeError) return { file, proposal: {}, metadata: { sourceName: file.name, parser: 'Проверка файла', status: 'error', confidence: 0, warnings: [sizeError] }, error: sizeError }
         try {
           let result: ParseResult
@@ -276,7 +273,7 @@ function App() {
         {uploads.length === 0 && !reading && <ModelSelector models={models} selected={selectedModels} mode={selectionMode} onModeChange={changeSelectionMode} onToggle={toggleModel} />}
         {uploads.length === 0 && !reading && <div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => inputRef.current?.click()}>
           <input ref={inputRef} type="file" multiple accept=".docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.pdf,.png,.jpg,.jpeg,.webp" onChange={onInput} />
-          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">PDF, DOCX и OCR обрабатываются настроенным сервером и Ollama. Другие форматы разбираются в браузере. Исходные файлы не сохраняются.</small>
+          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">PDF/DOCX читаются из текстового слоя, сканы распознаются Tesseract, затем Qwen структурирует текст. Другие форматы разбираются в браузере. Исходные файлы не сохраняются.</small>
         </div>}
         {reading && <div className="analysis"><div className="spinner" /><h2>{selectedModels.length > 1 ? `Сравниваем ${selectedModels.length} модели` : 'Читаем документы'}</h2><p>Каждая модель последовательно извлекает поля и позиции. Длинные документы обрабатываются частями.</p><small className="active-models">{models.filter(({ id }) => selectedModels.includes(id)).map(({ name }) => name).join(' → ')}</small></div>}
         {!reading && uploads.length > 0 && <>
