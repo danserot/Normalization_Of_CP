@@ -2,220 +2,156 @@ import * as mammoth from 'mammoth'
 import * as pdfjsLib from 'pdfjs-dist'
 import * as XLSX from 'xlsx'
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString()
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
 
 export type ParserStatus = 'parsed' | 'unsupported' | 'empty' | 'error'
 export type ProposalItem = { name: string; quantity: number; unit: string; unitPrice: number }
 export type CommercialProposal = {
-  title: string
-  client: string
-  clientContact: string
-  validUntil: string
-  notes: string
-  items: ProposalItem[]
+  title: string; client: string; clientContact: string; validUntil: string; supplier: string; currency: string
+  vat: string; discount: string; delivery: string; paymentTerms: string; deliveryTerms: string; warranty: string
+  documentNumber: string; documentDate: string; documentTotal: number; notes: string; items: ProposalItem[]
 }
+export type FieldEvidence = { file: string; excerpt: string; verifiedInSource: boolean; page?: number }
 export type ExtractionMetadata = {
-  sourceName: string
-  parser: string
-  status: ParserStatus
-  confidence: number
-  warnings: string[]
+  sourceName: string; parser: string; status: ParserStatus; confidence: number; warnings: string[]
+  fieldEvidence?: Record<string, FieldEvidence | FieldEvidence[]>; ocrPages?: number
 }
 export type ParseResult = { proposal: Partial<CommercialProposal>; metadata: ExtractionMetadata }
-
-export interface DocumentParser {
-  canParse(file: File): boolean
-  parse(file: File): Promise<ParseResult>
-}
+export interface DocumentParser { canParse(file: File): boolean; parse(file: File): Promise<ParseResult> }
 
 const emptyResult = (file: File, parser: string, status: ParserStatus, warning: string): ParseResult => ({
-  proposal: {},
-  metadata: { sourceName: file.name, parser, status, confidence: 0, warnings: [warning] },
+  proposal: {}, metadata: { sourceName: file.name, parser, status, confidence: 0, warnings: [warning] },
 })
-
 const parseNumber = (value: unknown): number => {
-  const parsed = Number(String(value ?? '').replace(/\s/g, '').replace(',', '.').replace(/[^\d.-]/g, ''))
+  const raw = String(value ?? '').replace(/\s/g, '').replace(/[^\d,.-]/g, '')
+  const normalized = raw.includes(',') && raw.includes('.') ? raw.replace(/\./g, '').replace(',', '.') : raw.replace(',', '.')
+  const parsed = Number(normalized)
   return Number.isFinite(parsed) ? parsed : 0
 }
-
-const valueAfterLabel = (lines: string[], pattern: RegExp): string => {
+const linesOf = (text: string) => text.split(/\r?\n/).map((line) => line.replace(/[^\S\t]+/g, ' ').trim()).filter(Boolean)
+const valueAfter = (lines: string[], pattern: RegExp) => {
   const line = lines.find((candidate) => pattern.test(candidate))
-  if (!line) return ''
-  return line.replace(pattern, '').replace(/^[\s:;,-]+/, '').trim()
+  return line?.replace(pattern, '').replace(/^[\s:;,-]+/, '').trim() ?? ''
 }
 
 const parseItems = (lines: string[]): ProposalItem[] => {
-  const items: ProposalItem[] = []
-  const headers = /наименование|название|описание|товар|услуга|кол-во|количество|цена|стоимость|сумма/i
-
-  for (const line of lines) {
-    if (headers.test(line) && !/\d/.test(line)) continue
+  const header = /наименование|название|описание|товар|услуга|кол-во|количество|цена|стоимость|сумма/i
+  return lines.flatMap((line) => {
+    if (header.test(line) && !/\d/.test(line)) return []
     const cells = line.split(/\t+|\s{2,}|\|/).map((cell) => cell.trim()).filter(Boolean)
-    if (cells.length < 3) continue
-    const numericCells = cells
-      .map((cell, index) => ({ index, value: parseNumber(cell), hasNumber: /\d/.test(cell) }))
-      .filter((cell) => cell.hasNumber)
-    if (numericCells.length < 2) continue
-
-    const quantityCell = numericCells[0]
-    const priceCell = numericCells[numericCells.length - 1]
-    const name = cells.slice(0, quantityCell.index).join(' ').trim()
-    if (!name || headers.test(name)) continue
-
-    const unitCell = cells[quantityCell.index + 1]
-    const unit = unitCell && !/\d/.test(unitCell) && unitCell.length <= 12 ? unitCell : 'шт.'
-    items.push({
-      name,
-      quantity: quantityCell.value || 1,
-      unit,
-      unitPrice: priceCell.value,
-    })
-  }
-  return items
+    if (cells.length < 3) return []
+    const numeric = cells.map((cell, index) => ({ cell, index, value: parseNumber(cell), numeric: /\d/.test(cell) })).filter(({ numeric }) => numeric)
+    if (numeric.length < 2) return []
+    const quantity = numeric[0]
+    const price = numeric[numeric.length - 1]
+    const name = cells.slice(0, quantity.index).join(' ').trim()
+    if (!name || header.test(name)) return []
+    const unitCell = cells[quantity.index + 1]
+    return [{ name, quantity: quantity.value, unit: unitCell && !/\d/.test(unitCell) && unitCell.length < 16 ? unitCell : 'шт.', unitPrice: price.value }]
+  })
 }
 
 const parseProposalText = (text: string): Partial<CommercialProposal> => {
-  const lines = text.split(/\r?\n/).map((line) => line.replace(/[^\S\t]+/g, ' ').trim()).filter(Boolean)
-  const client = valueAfterLabel(lines, /^(?:клиент|заказчик|организация|компания)\b/i)
-  const clientContact = valueAfterLabel(lines, /^(?:контакт|телефон|тел\.|email|e-mail)\b/i)
-  const validUntil = valueAfterLabel(lines, /^(?:срок действия|действительно до|срок предложения)\b/i)
-  const items = parseItems(lines)
-  const title = lines.find((line) => /коммерческ|предложен|прайс|расценк/i.test(line)) ?? lines[0] ?? 'Коммерческое предложение'
+  const lines = linesOf(text)
+  const title = lines.find((line) => /коммерческ|предложени|прайс|расценк/i.test(line)) ?? lines[0] ?? ''
+  const totalLine = lines.find((line) => /итого|всего|к оплате|общая сумма/i.test(line)) ?? ''
+  return {
+    title,
+    client: valueAfter(lines, /^(?:клиент|заказчик|покупатель|организация|компания)\b/i),
+    clientContact: valueAfter(lines, /^(?:контакт|телефон|тел\.?|email|e-mail)\b/i),
+    validUntil: valueAfter(lines, /^(?:срок действия|действительно до|срок предложения)\b/i),
+    supplier: valueAfter(lines, /^(?:поставщик|исполнитель|продавец)\b/i),
+    currency: (text.match(/\b(RUB|USD|EUR|KZT|TRY|₽|руб\.?|доллар(?:ов)?|евро)\b/i)?.[0] ?? ''),
+    vat: valueAfter(lines, /^(?:ндс|налог)\b/i),
+    discount: valueAfter(lines, /^(?:скидка)\b/i),
+    delivery: valueAfter(lines, /^(?:доставка|стоимость доставки)\b/i),
+    paymentTerms: valueAfter(lines, /^(?:условия оплаты|оплата)\b/i),
+    deliveryTerms: valueAfter(lines, /^(?:срок поставки|сроки поставки)\b/i),
+    warranty: valueAfter(lines, /^(?:гарантия|гарантийный срок)\b/i),
+    documentNumber: valueAfter(lines, /^(?:номер|№ документа)\b/i),
+    documentDate: valueAfter(lines, /^(?:дата|от)\b/i),
+    documentTotal: parseNumber(totalLine),
+    notes: text,
+    items: parseItems(lines),
+  }
+}
 
-  return { title, client, clientContact, validUntil, notes: text, ...(items.length ? { items } : {}) }
+const resultFor = (file: File, parser: string, text: string, proposal: Partial<CommercialProposal>): ParseResult => {
+  const hasData = Object.entries(proposal).some(([key, value]) => key !== 'notes' && key !== 'title' && (typeof value === 'string' ? !!value : Array.isArray(value) ? value.length > 0 : !!value))
+  if (!hasData) return emptyResult(file, parser, 'empty', 'Не удалось уверенно выделить поля или позиции')
+  return {
+    proposal,
+    metadata: { sourceName: file.name, parser, status: 'parsed', confidence: proposal.items?.length ? 0.72 : 0.5, warnings: ['Локальный разбор: проверьте поля и строки таблицы перед подтверждением'] },
+  }
 }
 
 export class WordParser implements DocumentParser {
   canParse(file: File) { return /\.docx$/i.test(file.name) }
-  async parse(file: File): Promise<ParseResult> {
+  async parse(file: File) {
     try {
       const arrayBuffer = await file.arrayBuffer()
-      const result = await mammoth.extractRawText({ arrayBuffer })
+      const raw = await mammoth.extractRawText({ arrayBuffer })
       const html = await mammoth.convertToHtml({ arrayBuffer })
       const tableLines = Array.from(new DOMParser().parseFromString(html.value, 'text/html').querySelectorAll('tr'))
         .map((row) => Array.from(row.querySelectorAll('th,td')).map((cell) => cell.textContent?.trim() ?? '').join('\t'))
-        .filter(Boolean)
-      const text = [result.value.trim(), ...tableLines].filter(Boolean).join('\n').trim()
-      if (!text) return emptyResult(file, 'WordParser', 'empty', 'В документе не найден текст')
-      const proposal = parseProposalText(text)
-      return {
-        proposal,
-        metadata: {
-          sourceName: file.name,
-          parser: 'WordParser',
-          status: 'parsed',
-          confidence: proposal.client && proposal.items?.length ? 0.9 : proposal.client ? 0.78 : 0.6,
-          warnings: ['Проверьте реквизиты и позиции перед отправкой'],
-        },
-      }
-    } catch { return emptyResult(file, 'WordParser', 'error', 'Не удалось прочитать DOCX файл') }
+      const text = [raw.value.trim(), ...tableLines].filter(Boolean).join('\n')
+      return text ? resultFor(file, 'DOCX локально', text, parseProposalText(text)) : emptyResult(file, 'DOCX локально', 'empty', 'В документе нет текста')
+    } catch { return emptyResult(file, 'DOCX локально', 'error', 'Не удалось прочитать DOCX') }
   }
 }
 
 export class ExcelParser implements DocumentParser {
   canParse(file: File) { return /\.(xlsx|xls)$/i.test(file.name) }
-  async parse(file: File): Promise<ParseResult> {
+  async parse(file: File) {
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' })
       const rows = workbook.SheetNames.flatMap((name) => XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, defval: '' }))
-      const items = rows.slice(0, 30).map((row) => {
-        const cells = Array.isArray(row) ? row : []
-        const name = String(cells[0] ?? '').trim()
-        return { name, quantity: parseNumber(cells[1]) || 1, unit: String(cells[2] || 'шт'), unitPrice: parseNumber(cells[3] ?? cells[2]) }
-      }).filter((item) => item.name && !/наименование|товар|название/i.test(item.name))
-      if (!items.length) return emptyResult(file, 'ExcelParser', 'empty', 'В таблице не найдены товарные позиции')
-      return {
-        proposal: { title: 'Коммерческое предложение', items },
-        metadata: { sourceName: file.name, parser: 'ExcelParser', status: 'parsed', confidence: 0.86, warnings: ['Проверьте колонки количества и цены'] },
-      }
-    } catch { return emptyResult(file, 'ExcelParser', 'error', 'Не удалось прочитать Excel файл') }
+      const items = rows.flatMap((row) => {
+        const cells = Array.isArray(row) ? row.map((cell) => String(cell ?? '').trim()) : []
+        const normalized = cells.map((cell) => cell.toLocaleLowerCase())
+        if (normalized.some((cell) => /наименование|название|товар/.test(cell))) return []
+        const name = cells[0] ?? ''
+        if (!name) return []
+        const quantity = parseNumber(cells[1])
+        const unit = cells[2] && !/\d/.test(cells[2]) ? cells[2] : 'шт.'
+        const priceIndex = cells.length >= 4 ? 3 : 2
+        const unitPrice = parseNumber(cells[priceIndex])
+        return quantity > 0 || unitPrice > 0 ? [{ name, quantity: quantity || 1, unit, unitPrice }] : []
+      })
+      return items.length ? resultFor(file, 'Excel локально', '', { title: 'Коммерческое предложение', items }) : emptyResult(file, 'Excel локально', 'empty', 'Не найдены строки с позициями')
+    } catch { return emptyResult(file, 'Excel локально', 'error', 'Не удалось прочитать Excel') }
   }
 }
 
 export class PdfParser implements DocumentParser {
   canParse(file: File) { return /\.pdf$/i.test(file.name) || file.type === 'application/pdf' }
-
-  async parse(file: File): Promise<ParseResult> {
+  async parse(file: File) {
     try {
       const document = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
       const pages: string[] = []
-
-      for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-        const page = await document.getPage(pageNumber)
+      for (let number = 1; number <= document.numPages; number += 1) {
+        const page = await document.getPage(number)
         const content = await page.getTextContent()
-        const pageText = content.items
-          .map((item) => 'str' in item ? item.str : '')
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-        if (pageText) pages.push(pageText)
+        pages.push(`[Страница ${number}]\n${content.items.map((item) => 'str' in item ? item.str : '').join(' ')}`)
       }
-
-      const text = pages.join('\n\n').trim()
-      if (!text) return emptyResult(file, 'PdfParser', 'empty', 'В PDF не найден текст. Возможно, это скан без OCR')
-
-      const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-      const clientLine = lines.find((line) => /клиент|заказчик|организац/i.test(line))
-      return {
-        proposal: {
-          title: lines[0] ?? 'Коммерческое предложение',
-          client: clientLine?.split(/[:;,]/).slice(1).join(':').trim() ?? '',
-          notes: text,
-        },
-        metadata: {
-          sourceName: file.name,
-          parser: 'PdfParser',
-          status: 'parsed',
-          confidence: clientLine ? 0.8 : 0.62,
-          warnings: ['Проверьте реквизиты и позиции перед отправкой'],
-        },
-      }
-    } catch {
-      return emptyResult(file, 'PdfParser', 'error', 'Не удалось прочитать PDF файл')
-    }
-  }
-}
-
-export class ImageParser implements DocumentParser {
-  canParse(file: File) { return /\.(jpe?g|png|gif|webp)$/i.test(file.name) }
-  async parse(file: File): Promise<ParseResult> {
-    return emptyResult(file, 'ImageParser', 'unsupported', 'Распознавание изображений пока недоступно')
+      const text = pages.join('\n').trim()
+      return text ? resultFor(file, 'PDF локально', text, parseProposalText(text)) : emptyResult(file, 'PDF локально', 'empty', 'В PDF нет текстового слоя; требуется OCR сервером')
+    } catch { return emptyResult(file, 'PDF локально', 'error', 'Не удалось прочитать PDF') }
   }
 }
 
 export class TextParser implements DocumentParser {
   canParse(file: File) { return /\.(txt|csv|tsv|json)$/i.test(file.name) || file.type.startsWith('text/') }
-  async parse(file: File): Promise<ParseResult> {
+  async parse(file: File) {
     try {
       const text = (await file.text()).trim()
-      if (!text) return emptyResult(file, 'TextParser', 'empty', 'В документе нет текста')
-      const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-      const clientLine = lines.find((line) => /клиент|заказчик|организац/i.test(line))
-      return {
-        proposal: {
-          title: lines[0] ?? 'Коммерческое предложение',
-          client: clientLine?.split(/[:;,]/).slice(1).join(':').trim() ?? '',
-          notes: text,
-        },
-        metadata: {
-          sourceName: file.name,
-          parser: 'TextParser',
-          status: 'parsed',
-          confidence: clientLine ? 0.7 : 0.5,
-          warnings: ['Проверьте реквизиты и позиции перед отправкой'],
-        },
-      }
-    } catch {
-      return emptyResult(file, 'TextParser', 'error', 'Не удалось прочитать текстовый файл')
-    }
+      return text ? resultFor(file, 'Текст локально', text, parseProposalText(text)) : emptyResult(file, 'Текст локально', 'empty', 'Файл пуст')
+    } catch { return emptyResult(file, 'Текст локально', 'error', 'Не удалось прочитать текстовый файл') }
   }
 }
 
-const parsers: DocumentParser[] = [new WordParser(), new ExcelParser(), new PdfParser(), new TextParser(), new ImageParser()]
+const parsers: DocumentParser[] = [new WordParser(), new ExcelParser(), new PdfParser(), new TextParser()]
 export const parseDocument = async (file: File): Promise<ParseResult> => {
   const parser = parsers.find((candidate) => candidate.canParse(file))
-  return parser ? parser.parse(file) : emptyResult(file, 'NoParser', 'unsupported', 'Формат файла не поддерживается')
+  return parser ? parser.parse(file) : emptyResult(file, 'Без парсера', 'unsupported', 'Формат файла не поддерживается')
 }

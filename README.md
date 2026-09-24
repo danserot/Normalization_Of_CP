@@ -1,119 +1,71 @@
 # ReadDocument
 
-## AI extraction pipeline
+ReadDocument извлекает реквизиты и позиции из коммерческих предложений, показывает источники распознанных значений, помогает разрешить расхождения между файлами и сохраняет проверенный результат.
 
-PDF and DOCX files can be processed through the local AI pipeline:
+## Возможности
 
-```text
-React -> FastAPI /api/extract -> PDF/DOCX text extraction -> Ollama Qwen2.5-VL-7B -> JSON -> React
+- Загрузка нескольких PDF, DOCX, XLSX, XLS, CSV, TSV, TXT, JSON, PNG, JPG и WEBP файлов до 25 МБ каждый.
+- Извлечение PDF/DOCX и OCR сканов/изображений через локальную Ollama с Qwen2.5-VL.
+- Локальный разбор таблиц и текстовых файлов в браузере; PDF/DOCX также используют его как запасной вариант, если AI API недоступен.
+- Сводка нескольких файлов с явным выбором при конфликте реквизитов и предупреждениями о возможных повторных позициях.
+- Ручное редактирование, проверка обязательных полей и сравнение итоговой суммы с суммой из документа.
+- Экспорт результата в JSON и CSV.
+- Сохранение подтвержденных данных в SQLite с ключом идемпотентности и получением сохраненной записи по ID.
+
+Распознавание не считается подтверждением: проверьте значения и цитаты источника. OCR использует только видимые данные и может ошибаться. Если у поля нет точного совпадения в извлеченном текстовом слое, интерфейс помечает источник как требующий проверки.
+
+## Запуск через Docker
+
+```powershell
+docker compose up --build
 ```
 
-Start the local model:
+Откройте `http://localhost:8080`. При первом старте Ollama загружает модель; это может занять несколько минут и требует места на диске. Результаты SQLite хранятся в volume `proposal_data`, модель — в `ollama_data`.
 
-```bash
+Ollama опубликована только на loopback `127.0.0.1:11434`. API доступен интерфейсу через Nginx и не публикует порт напрямую.
+
+Остановка:
+
+```powershell
+docker compose down
+```
+
+Чтобы удалить также данные модели и сохраненные предложения, отдельно выполните `docker compose down --volumes`.
+
+## Запуск для разработки
+
+Установите и запустите локальную модель:
+
+```powershell
 ollama pull qwen2.5vl:7b
 ollama serve
 ```
 
-Start the extraction API from the project root:
+В отдельном терминале установите и запустите API:
 
-```bash
+```powershell
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r backend\requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Then start the frontend with `npm run dev`. PDF/DOCX requests are sent to the API automatically. If the API or Ollama is unavailable, the browser parser remains a fallback.
-
-The API returns the same `CommercialProposal` JSON shape used by React. Set `OLLAMA_MODEL` or `OLLAMA_URL` to use another local Ollama model or host.
-
-## Docker
-
-Run the complete stack (frontend, API, Ollama and Qwen model) with:
+В третьем терминале запустите интерфейс:
 
 ```powershell
-docker compose up --build
+npm install
+npm run dev
 ```
 
-Open `http://localhost:8080`. The first startup downloads the Qwen model into the persistent `ollama_data` volume and can take several minutes. The Ollama container needs enough disk space for the model; GPU passthrough can be added to the `ollama` service when Docker Desktop is configured for GPU support.
+Интерфейс доступен на `http://localhost:5173`, API проксируется через Vite. SQLite файл по умолчанию создаётся в `backend/data/readdocument.sqlite3`; путь и модель можно изменить переменными `DATABASE_PATH`, `OLLAMA_MODEL` и `OLLAMA_URL`.
 
-Stop the stack:
+## API
 
-```powershell
-docker compose down
-```
+- `GET /api/health` — состояние API и имя модели.
+- `POST /api/extract` — загрузка и распознавание файла (multipart поле `file`).
+- `POST /api/proposals` — сохранение подтвержденного предложения. Необязательный заголовок `Idempotency-Key` должен содержать UUID; повтор с тем же ключом возвращает исходный ID.
+- `GET /api/proposals/{id}` — чтение сохраненного предложения по UUID.
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Безопасность и размещение
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
-```
-
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
-```
+Сейчас проект рассчитан на локальное использование или защищенный доверенный контур. В API нет учетных записей и авторизации пользователей; перед публикацией в интернете необходимо добавить аутентификацию и разграничение доступа к сохраненным предложениям. Исходные файлы сохраняются только временно в памяти процесса; в SQLite остаются подтвержденный JSON и сведения об источниках. Не отправляйте документы в общедоступный Ollama endpoint.
