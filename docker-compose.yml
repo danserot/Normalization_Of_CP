@@ -15,8 +15,13 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen2.5vl:7b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-vl:8b}
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-qwen3-vl:8b,minicpm-v4.5:8b,gemma3:4b,granite3.2-vision:2b}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
       DATABASE_PATH: /data/readdocument.sqlite3
+      APP_PASSWORD: ${APP_PASSWORD:-}
+      APP_SECRET: ${APP_SECRET:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - proposal_data:/data
     depends_on:
@@ -32,18 +37,22 @@ services:
       - "127.0.0.1:11434:11434"
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-qwen3-vl:8b,minicpm-v4.5:8b,gemma3:4b,granite3.2-vision:2b}
+      OLLAMA_MAX_LOADED_MODELS: 1
+      OLLAMA_NUM_PARALLEL: 1
     entrypoint: ["/bin/sh", "-c"]
     command: >
       "ollama serve &
       pid=$$!;
       until ollama list >/dev/null 2>&1; do sleep 2; done;
-      ollama pull qwen2.5vl:7b;
+      for model in $$(echo "$$OLLAMA_MODELS" | tr ',' ' '); do ollama pull "$$model"; done;
+      touch /tmp/models-ready;
       wait $$pid"
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD-SHELL", "test -f /tmp/models-ready"]
       interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 180
     restart: unless-stopped
 
 volumes:

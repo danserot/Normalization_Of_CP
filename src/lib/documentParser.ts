@@ -1,9 +1,3 @@
-import * as mammoth from 'mammoth'
-import * as pdfjsLib from 'pdfjs-dist'
-import * as XLSX from 'xlsx'
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
-
 export type ParserStatus = 'parsed' | 'unsupported' | 'empty' | 'error'
 export type ProposalItem = { name: string; quantity: number; unit: string; unitPrice: number }
 export type CommercialProposal = {
@@ -12,9 +6,20 @@ export type CommercialProposal = {
   documentNumber: string; documentDate: string; documentTotal: number; notes: string; items: ProposalItem[]
 }
 export type FieldEvidence = { file: string; excerpt: string; verifiedInSource: boolean; page?: number }
+export type ModelRun = {
+  model: string
+  name: string
+  status: 'parsed' | 'error'
+  durationMs: number
+  proposal?: Partial<CommercialProposal>
+  confidence: number
+  error?: string
+}
 export type ExtractionMetadata = {
   sourceName: string; parser: string; status: ParserStatus; confidence: number; warnings: string[]
   fieldEvidence?: Record<string, FieldEvidence | FieldEvidence[]>; ocrPages?: number
+  ocrPageNumbers?: number[]
+  modelRuns?: ModelRun[]
 }
 export type ParseResult = { proposal: Partial<CommercialProposal>; metadata: ExtractionMetadata }
 export interface DocumentParser { canParse(file: File): boolean; parse(file: File): Promise<ParseResult> }
@@ -76,7 +81,7 @@ const parseProposalText = (text: string): Partial<CommercialProposal> => {
   }
 }
 
-const resultFor = (file: File, parser: string, text: string, proposal: Partial<CommercialProposal>): ParseResult => {
+const resultFor = (file: File, parser: string, proposal: Partial<CommercialProposal>): ParseResult => {
   const hasData = Object.entries(proposal).some(([key, value]) => key !== 'notes' && key !== 'title' && (typeof value === 'string' ? !!value : Array.isArray(value) ? value.length > 0 : !!value))
   if (!hasData) return emptyResult(file, parser, 'empty', 'Не удалось уверенно выделить поля или позиции')
   return {
@@ -89,13 +94,16 @@ export class WordParser implements DocumentParser {
   canParse(file: File) { return /\.docx$/i.test(file.name) }
   async parse(file: File) {
     try {
+      const mammoth = await import('mammoth')
       const arrayBuffer = await file.arrayBuffer()
-      const raw = await mammoth.extractRawText({ arrayBuffer })
       const html = await mammoth.convertToHtml({ arrayBuffer })
-      const tableLines = Array.from(new DOMParser().parseFromString(html.value, 'text/html').querySelectorAll('tr'))
+      const parsed = new DOMParser().parseFromString(html.value, 'text/html')
+      const paragraphLines = Array.from(parsed.querySelectorAll('p')).filter((paragraph) => !paragraph.closest('table'))
+        .map((paragraph) => paragraph.textContent?.trim() ?? '').filter(Boolean)
+      const tableLines = Array.from(parsed.querySelectorAll('tr'))
         .map((row) => Array.from(row.querySelectorAll('th,td')).map((cell) => cell.textContent?.trim() ?? '').join('\t'))
-      const text = [raw.value.trim(), ...tableLines].filter(Boolean).join('\n')
-      return text ? resultFor(file, 'DOCX локально', text, parseProposalText(text)) : emptyResult(file, 'DOCX локально', 'empty', 'В документе нет текста')
+      const text = [...paragraphLines, ...tableLines].filter(Boolean).join('\n')
+      return text ? resultFor(file, 'DOCX локально', parseProposalText(text)) : emptyResult(file, 'DOCX локально', 'empty', 'В документе нет текста')
     } catch { return emptyResult(file, 'DOCX локально', 'error', 'Не удалось прочитать DOCX') }
   }
 }
@@ -104,6 +112,7 @@ export class ExcelParser implements DocumentParser {
   canParse(file: File) { return /\.(xlsx|xls)$/i.test(file.name) }
   async parse(file: File) {
     try {
+      const XLSX = await import('xlsx')
       const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' })
       const rows = workbook.SheetNames.flatMap((name) => XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, defval: '' }))
       const items = rows.flatMap((row) => {
@@ -118,7 +127,7 @@ export class ExcelParser implements DocumentParser {
         const unitPrice = parseNumber(cells[priceIndex])
         return quantity > 0 || unitPrice > 0 ? [{ name, quantity: quantity || 1, unit, unitPrice }] : []
       })
-      return items.length ? resultFor(file, 'Excel локально', '', { title: 'Коммерческое предложение', items }) : emptyResult(file, 'Excel локально', 'empty', 'Не найдены строки с позициями')
+      return items.length ? resultFor(file, 'Excel локально', { title: 'Коммерческое предложение', items }) : emptyResult(file, 'Excel локально', 'empty', 'Не найдены строки с позициями')
     } catch { return emptyResult(file, 'Excel локально', 'error', 'Не удалось прочитать Excel') }
   }
 }
@@ -127,6 +136,8 @@ export class PdfParser implements DocumentParser {
   canParse(file: File) { return /\.pdf$/i.test(file.name) || file.type === 'application/pdf' }
   async parse(file: File) {
     try {
+      const pdfjsLib = await import('pdfjs-dist')
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
       const document = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
       const pages: string[] = []
       for (let number = 1; number <= document.numPages; number += 1) {
@@ -135,7 +146,7 @@ export class PdfParser implements DocumentParser {
         pages.push(`[Страница ${number}]\n${content.items.map((item) => 'str' in item ? item.str : '').join(' ')}`)
       }
       const text = pages.join('\n').trim()
-      return text ? resultFor(file, 'PDF локально', text, parseProposalText(text)) : emptyResult(file, 'PDF локально', 'empty', 'В PDF нет текстового слоя; требуется OCR сервером')
+      return text ? resultFor(file, 'PDF локально', parseProposalText(text)) : emptyResult(file, 'PDF локально', 'empty', 'В PDF нет текстового слоя; требуется OCR сервером')
     } catch { return emptyResult(file, 'PDF локально', 'error', 'Не удалось прочитать PDF') }
   }
 }
@@ -145,7 +156,7 @@ export class TextParser implements DocumentParser {
   async parse(file: File) {
     try {
       const text = (await file.text()).trim()
-      return text ? resultFor(file, 'Текст локально', text, parseProposalText(text)) : emptyResult(file, 'Текст локально', 'empty', 'Файл пуст')
+      return text ? resultFor(file, 'Текст локально', parseProposalText(text)) : emptyResult(file, 'Текст локально', 'empty', 'Файл пуст')
     } catch { return emptyResult(file, 'Текст локально', 'error', 'Не удалось прочитать текстовый файл') }
   }
 }
