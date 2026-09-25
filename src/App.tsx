@@ -8,9 +8,9 @@ import './App.css'
 
 type Upload = { file: File; proposal: Partial<CommercialProposal>; metadata: ExtractionMetadata; error?: string }
 const fallbackModels: ExtractionModel[] = [
-  { id: 'qwen2.5:3b', name: 'Qwen 2.5 3B', description: 'Компактная text-модель для русского текста, таблиц и JSON', size: '≈1.9 ГБ', recommended: true },
+  { id: 'gpt-5-mini', name: 'gpt-5-mini', description: 'OpenAI API: распознавание и структурирование документа', size: 'облачная API-модель', recommended: true },
 ]
-const defaultComparisonModels = ['qwen2.5:3b']
+const defaultComparisonModels = fallbackModels.map(({ id }) => id)
 async function mapWithLimit<T, R>(items: T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
   let cursor = 0
@@ -73,7 +73,7 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [models, setModels] = useState<ExtractionModel[]>(fallbackModels)
   const [selectionMode, setSelectionMode] = useState<'single' | 'compare'>('single')
-  const [selectedModels, setSelectedModels] = useState<string[]>(['qwen2.5:3b'])
+  const [selectedModels, setSelectedModels] = useState<string[]>(['gpt-5-mini'])
   const inputRef = useRef<HTMLInputElement>(null)
   const submissionKey = useRef(crypto.randomUUID())
   useEffect(() => {
@@ -115,7 +115,7 @@ function App() {
           current[0] ?? models[0].id,
           ...models.filter(({ id }) => defaultComparisonModels.includes(id)).map(({ id }) => id),
           ...models.map(({ id }) => id),
-        ])).slice(0, 2))
+        ])).slice(0, 4))
   }
   const toggleModel = (modelId: string) => {
     setSelectedModels((current) => {
@@ -273,7 +273,7 @@ function App() {
         {uploads.length === 0 && !reading && <ModelSelector models={models} selected={selectedModels} mode={selectionMode} onModeChange={changeSelectionMode} onToggle={toggleModel} />}
         {uploads.length === 0 && !reading && <div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => inputRef.current?.click()}>
           <input ref={inputRef} type="file" multiple accept=".docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.pdf,.png,.jpg,.jpeg,.webp" onChange={onInput} />
-          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">PDF/DOCX читаются из текстового слоя, сканы распознаются Tesseract, затем Qwen структурирует текст. Другие форматы разбираются в браузере. Исходные файлы не сохраняются.</small>
+          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">PDF/DOCX читаются из текстового слоя, сканы распознаются Tesseract, затем данные структурируются через OpenAI API. Другие форматы разбираются в браузере. Исходные файлы не сохраняются.</small>
         </div>}
         {reading && <div className="analysis"><div className="spinner" /><h2>{selectedModels.length > 1 ? `Сравниваем ${selectedModels.length} модели` : 'Читаем документы'}</h2><p>Каждая модель последовательно извлекает поля и позиции. Длинные документы обрабатываются частями.</p><small className="active-models">{models.filter(({ id }) => selectedModels.includes(id)).map(({ name }) => name).join(' → ')}</small></div>}
         {!reading && uploads.length > 0 && <>
@@ -309,14 +309,14 @@ function ModelSelector({ models, selected, mode, onModeChange, onToggle }: {
   onToggle: (model: string) => void
 }) {
   return <section className="model-selector">
-    <div className="model-selector-heading"><div><span className="step-label">ШАГ 1</span><h2>Выберите модели распознавания</h2><p>Одна модель работает быстрее. Сравнение находит расхождения и обычно извлекает больше полей.</p></div><div className="mode-switch" role="group" aria-label="Режим распознавания"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => onModeChange('single')}>Одна модель</button><button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => onModeChange('compare')}>Сравнить модели</button></div></div>
+    <div className="model-selector-heading"><div><span className="step-label">ШАГ 1</span><h2>Модель распознавания</h2><p>Модель выбирается переменной OPENAI_MODEL на сервере.</p></div>{models.length > 1 && <div className="mode-switch" role="group" aria-label="Режим распознавания"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => onModeChange('single')}>Одна модель</button><button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => onModeChange('compare')}>Сравнить модели</button></div>}</div>
     <div className="model-grid">{models.map((model) => {
       const checked = selected.includes(model.id)
       return <button type="button" className={`model-card ${checked ? 'selected' : ''}`} onClick={() => onToggle(model.id)} aria-pressed={checked} key={model.id}>
         <span className="model-check">{checked ? '✓' : ''}</span><span className="model-title">{model.name}{model.recommended && <small>Рекомендуемая</small>}</span><span className="model-description">{model.description}</span><span className="model-meta">{model.size}{model.installed === true ? ' · загружена' : model.installed === false ? ' · не загружена' : ''}</span>
       </button>
     })}</div>
-    <p className="model-selection-note">{mode === 'compare' ? `Выбрано ${selected.length} модели. Они запускаются по очереди, поэтому сравнение занимает больше времени.` : 'Будет использована одна выбранная модель.'}</p>
+    <p className="model-selection-note">{mode === 'compare' ? `Выбрано ${selected.length} модели. Они запускаются по очереди, поэтому сравнение занимает больше времени.` : 'Будет использована одна серверная модель.'}</p>
   </section>
 }
 

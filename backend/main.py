@@ -27,13 +27,10 @@ MAX_OCR_PAGES = 4
 MAX_IMAGE_SIDE = 2400
 TESSERACT_LANG = os.getenv("TESSERACT_LANG", "rus+eng")
 TESSERACT_CONFIG = os.getenv("TESSERACT_CONFIG", "--oem 1 --psm 6 -c preserve_interword_spaces=1")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_NUM_CTX = max(2048, min(int(os.getenv("OLLAMA_NUM_CTX", "4096")), 4096))
-DEFAULT_MODELS = ["qwen2.5:3b"]
-CONFIGURED_MODELS = [model.strip() for model in os.getenv("OLLAMA_MODELS", ",".join(DEFAULT_MODELS)).split(",") if model.strip()]
-MODEL_IDS = CONFIGURED_MODELS[:4] or DEFAULT_MODELS
-CONFIGURED_DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", MODEL_IDS[0])
-OLLAMA_MODEL = CONFIGURED_DEFAULT_MODEL if CONFIGURED_DEFAULT_MODEL in MODEL_IDS else MODEL_IDS[0]
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_API_URL = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+MODEL_IDS = [OPENAI_MODEL]
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "./backend/data/readdocument.sqlite3"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 APP_SECRET = os.getenv("APP_SECRET") or secrets.token_hex(32)
@@ -44,7 +41,7 @@ ALLOWED_SUFFIXES = {".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
 MAX_TEXT_CHARS_PER_CHUNK = 8_000
 MODEL_INFERENCE_LOCK = asyncio.Lock()
 MODEL_DETAILS = {
-    "qwen2.5:3b": {"name": "Qwen 2.5 3B", "description": "Компактная text-модель для русского текста, таблиц и JSON", "size": "≈1.9 ГБ", "recommended": True},
+    OPENAI_MODEL: {"name": OPENAI_MODEL, "description": "OpenAI API: распознавание и структурирование документа", "size": "облачная API-модель", "recommended": True},
 }
 
 
@@ -378,23 +375,22 @@ async def extract_model_part(
     source_name: str,
     text: str,
 ) -> dict:
-    message: dict = {"role": "user", "content": f"{PROMPT}\n\nФАЙЛ: {source_name}"}
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Не задан OPENAI_API_KEY")
+    content = f"ФАЙЛ: {source_name}"
     if text:
-        message["content"] += f"\n\nТЕКСТ ДОКУМЕНТА:\n{text}"
-    response = await client.post(
-        f"{OLLAMA_URL}/api/chat",
-        json={
-            "model": model,
-            "stream": False,
-            "format": "json",
-            "keep_alive": "30s",
-            "options": {"temperature": 0, "num_ctx": OLLAMA_NUM_CTX},
-            "messages": [message],
-        },
-    )
-    response.raise_for_status()
+        content += f"\n\nТЕКСТ ДОКУМЕНТА:\n{text}"
+    try:
+        response = await client.post(
+            f"{OPENAI_API_URL}/responses",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={"model": model, "instructions": PROMPT, "input": content, "store": False},
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(status_code=502, detail=f"OpenAI API вернул статус {error.response.status_code}") from error
     payload = response.json()
-    parsed = response_json(payload.get("message", {}).get("content", ""))
+    parsed = response_json(str(payload.get("output_text") or ""))
     return ground_proposal(normalize_proposal(parsed, text), text)
 
 
@@ -406,20 +402,6 @@ async def extract_with_model(text: str, source_name: str, model: str) -> dict:
     if not partials:
         raise HTTPException(status_code=422, detail="В документе не найдено содержимое для распознавания")
     return merge_partial_proposals(partials, text)
-
-
-async def unload_model(model: str) -> None:
-    """Release model memory before the next comparison run."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": model, "keep_alive": 0},
-            )
-            response.raise_for_status()
-    except httpx.HTTPError:
-        # The extraction result remains usable even if Ollama is already stopping.
-        pass
 
 
 async def run_models(
@@ -452,8 +434,6 @@ async def run_models(
                     "confidence": 0,
                     "error": detail or "Модель не вернула результат",
                 })
-            finally:
-                await unload_model(model)
     return model_runs
 
 
@@ -500,27 +480,13 @@ def evidence_for(proposal: dict, text: str, source_name: str) -> dict:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "database": "sqlite", "model": OLLAMA_MODEL, "models": MODEL_IDS}
+    return {"status": "ok", "database": "sqlite", "provider": "openai", "model": OPENAI_MODEL, "models": MODEL_IDS, "configured": bool(OPENAI_API_KEY)}
 
 
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
-    installed: set[str] = set()
-    ollama_available = False
-    try:
-        async with httpx.AsyncClient(timeout=4) as client:
-            response = await client.get(f"{OLLAMA_URL}/api/tags")
-            response.raise_for_status()
-            ollama_available = True
-            installed = {str(model.get("name") or "") for model in response.json().get("models", [])}
-    except (httpx.HTTPError, ValueError):
-        pass
-    models = []
-    for model_id in MODEL_IDS:
-        details = MODEL_DETAILS.get(model_id, {"name": model_id, "description": "Модель Ollama", "size": "неизвестно"})
-        is_installed = model_id in installed or (":" not in model_id and f"{model_id}:latest" in installed)
-        models.append({"id": model_id, **details, "installed": is_installed})
-    return {"models": models, "ollamaAvailable": ollama_available}
+    details = MODEL_DETAILS[OPENAI_MODEL]
+    return {"models": [{"id": OPENAI_MODEL, **details}], "openaiConfigured": bool(OPENAI_API_KEY)}
 
 
 @app.get("/api/session")
@@ -577,11 +543,11 @@ async def extract(file: UploadFile = File(...), models: str = Form(default=""), 
         if text_truncated:
             text = text[:500_000]
         try:
-            requested_models = json.loads(models) if models else [OLLAMA_MODEL]
+            requested_models = json.loads(models) if models else [OPENAI_MODEL]
         except json.JSONDecodeError as error:
             raise HTTPException(status_code=422, detail="Некорректный список моделей") from error
-        if not isinstance(requested_models, list) or not requested_models or len(requested_models) > 4:
-            raise HTTPException(status_code=422, detail="Выберите от одной до четырёх моделей")
+        if not isinstance(requested_models, list) or len(requested_models) != 1:
+            raise HTTPException(status_code=422, detail="Выберите одну OpenAI-модель")
         selected_models = list(dict.fromkeys(str(model) for model in requested_models))
         unknown_models = [model for model in selected_models if model not in MODEL_IDS]
         if unknown_models:

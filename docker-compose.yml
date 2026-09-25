@@ -14,10 +14,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
-      OLLAMA_MODELS: ${OLLAMA_MODELS:-qwen2.5:3b}
-      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
+      OPENAI_API_URL: ${OPENAI_API_URL:-https://api.openai.com/v1}
       TESSERACT_LANG: ${TESSERACT_LANG:-rus+eng}
       TESSERACT_CONFIG: ${TESSERACT_CONFIG:---oem 1 --psm 6 -c preserve_interword_spaces=1}
       DATABASE_PATH: /data/readdocument.sqlite3
@@ -26,42 +25,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - proposal_data:/data
-    depends_on:
-      ollama:
-        condition: service_healthy
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    ports:
-      - "127.0.0.1:11434:11434"
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_MODELS: ${OLLAMA_MODELS:-qwen2.5:3b}
-      OLLAMA_MAX_LOADED_MODELS: 1
-      OLLAMA_NUM_PARALLEL: 1
-      OLLAMA_MAX_QUEUE: 1
-      OLLAMA_FLASH_ATTENTION: 1
-      OLLAMA_KV_CACHE_TYPE: q8_0
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "ollama serve &
-      pid=$$!;
-      until ollama list >/dev/null 2>&1; do sleep 2; done;
-      for model in $$(echo "$$OLLAMA_MODELS" | tr ',' ' '); do ollama pull "$$model"; done;
-      touch /tmp/models-ready;
-      wait $$pid"
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/models-ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 180
-    mem_limit: 3g
-    mem_reservation: 1g
     restart: unless-stopped
 
 volumes:
-  ollama_data:
   proposal_data:
