@@ -9,6 +9,12 @@ lerna-debug.log*
 
 node_modules
 .venv/
+models/
+runtime/
+__pycache__/
+test-results/
+.pytest_cache/
+pytest-cache-files-*/
 backend/data/
 *.sqlite3
 dist

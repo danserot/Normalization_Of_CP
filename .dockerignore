@@ -5,3 +5,11 @@ dist
 __pycache__
 *.pyc
 *.log
+.env
+.env.*
+models
+runtime
+test-results
+backend/data
+.pytest_cache
+pytest-cache-files-*

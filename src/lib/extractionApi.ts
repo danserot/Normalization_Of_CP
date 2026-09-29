@@ -1,6 +1,6 @@
 import type { ParseResult } from './documentParser'
 
-const backendFormats = /\.(pdf|docx|png|jpe?g|webp)$/i
+const backendFormats = /\.(pdf|docx|xlsx|xls|csv|tsv|txt|json|png|jpe?g|webp)$/i
 
 export const canUseExtractionApi = (file: File) => backendFormats.test(file.name)
 
@@ -31,7 +31,7 @@ export const parseWithExtractionApi = async (file: File, models: string[]): Prom
   const body = new FormData()
   body.append('file', file)
   body.append('models', JSON.stringify(models))
-  const response = await fetch('/api/extract', { method: 'POST', body, credentials: 'include' })
+  const response = await fetch('/api/extract', { method: 'POST', body, credentials: 'include', signal: AbortSignal.timeout(200_000) })
   if (!response.ok) {
     notifyUnauthorized(response.status)
     const payload = await response.json().catch(() => ({})) as { detail?: string }

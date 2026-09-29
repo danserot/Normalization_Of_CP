@@ -4,9 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:80"
-    depends_on:
-      - backend
+      - "127.0.0.1:8080:80"
+    depends_on: [backend]
+    mem_limit: 128m
+    memswap_limit: 128m
+    networks: [offline, web]
     restart: unless-stopped
 
   backend:
@@ -14,18 +16,44 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
-      OPENAI_API_URL: ${OPENAI_API_URL:-https://api.openai.com/v1}
+      LOCAL_MODEL_ENABLED: ${LOCAL_MODEL_ENABLED:-true}
       TESSERACT_LANG: ${TESSERACT_LANG:-rus+eng}
-      TESSERACT_CONFIG: ${TESSERACT_CONFIG:---oem 1 --psm 6 -c preserve_interword_spaces=1}
+      OMP_THREAD_LIMIT: "2"
       DATABASE_PATH: /data/readdocument.sqlite3
       APP_PASSWORD: ${APP_PASSWORD:-}
       APP_SECRET: ${APP_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
       - proposal_data:/data
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 2
+    networks: [offline]
     restart: unless-stopped
+
+  model:
+    profiles: [model]
+    image: ghcr.io/ggml-org/llama.cpp@sha256:f9115c95639e60abc09d4ea83b26fd4d56c66aa1174594393335a514da00c283
+    network_mode: service:backend
+    depends_on: [backend]
+    volumes:
+      - ./models:/models:ro
+    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "2048", "-np", "1", "-t", "2", "-ngl", "0", "-b", "128", "-ub", "128"]
+    mem_limit: 1900m
+    memswap_limit: 1900m
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8081/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  web:
+  offline:
+    internal: true
 
 volumes:
   proposal_data:

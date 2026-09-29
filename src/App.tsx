@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, FormEvent } from 'react'
-import { parseDocument } from './lib/documentParser'
 import { canUseExtractionApi, getExtractionModels, parseWithExtractionApi, submitProposal } from './lib/extractionApi'
 import type { ExtractionModel } from './lib/extractionApi'
-import type { CommercialProposal, ExtractionMetadata, FieldEvidence, ModelRun, ParseResult } from './lib/documentParser'
+import type { CommercialProposal, ExtractionMetadata, FieldEvidence, ModelRun } from './lib/documentParser'
 import './App.css'
 
 type Upload = { file: File; proposal: Partial<CommercialProposal>; metadata: ExtractionMetadata; error?: string }
 const fallbackModels: ExtractionModel[] = [
-  { id: 'gpt-5-mini', name: 'gpt-5-mini', description: 'OpenAI API: распознавание и структурирование документа', size: 'облачная API-модель', recommended: true },
+  { id: 'local', name: 'Локальное извлечение', description: 'Правила, Tesseract и Qwen для неоднозначных фрагментов', size: 'CPU · без внешних API', recommended: true },
 ]
 const defaultComparisonModels = fallbackModels.map(({ id }) => id)
 async function mapWithLimit<T, R>(items: T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
@@ -23,9 +22,9 @@ async function mapWithLimit<T, R>(items: T[], limit: number, action: (item: T) =
   return results
 }
 const blank: CommercialProposal = {
-  title: 'Коммерческое предложение', client: '', clientContact: '', validUntil: '', supplier: '',
+  title: '', client: '', clientContact: '', validUntil: '', supplier: '',
   currency: '', vat: '', discount: '', delivery: '', paymentTerms: '', deliveryTerms: '', warranty: '',
-  documentNumber: '', documentDate: '', documentTotal: 0, notes: '', items: [],
+  documentNumber: '', documentDate: '', documentTotal: null, notes: '', items: [],
 }
 const textFields: Array<[keyof CommercialProposal, string]> = [
   ['title', 'Название'], ['client', 'Клиент'], ['clientContact', 'Контакт'], ['validUntil', 'Срок действия'],
@@ -33,12 +32,16 @@ const textFields: Array<[keyof CommercialProposal, string]> = [
   ['currency', 'Валюта'], ['vat', 'НДС'], ['discount', 'Скидка'], ['delivery', 'Доставка'],
   ['paymentTerms', 'Условия оплаты'], ['deliveryTerms', 'Сроки поставки'], ['warranty', 'Гарантия'],
 ]
-const money = (value: number, currency: string) => {
-  const known = /^[A-Z]{3}$/.test(currency) ? currency : 'RUB'
+const money = (value: number | null, currency: string) => {
+  if (value === null) return 'Не найдено'
+
+  const known = ({ 'руб.': 'RUB', 'руб': 'RUB', '₽': 'RUB', 'тенге': 'KZT', '₸': 'KZT' } as Record<string, string>)[currency] ?? currency.toUpperCase()
   if (!currency.trim()) return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} · валюта не указана`
   try { return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: known, maximumFractionDigits: 2 }).format(value) }
   catch { return `${value.toLocaleString('ru-RU')} ${currency}` }
 }
+const itemSum = (item: CommercialProposal['items'][number]): number | null => item.quantity === null || item.unitPrice === null ? null : item.quantity * item.unitPrice
+const sumItems = (items: CommercialProposal['items']): number | null => items.some((item) => itemSum(item) === null) ? null : items.reduce((sum, item) => sum + (itemSum(item) ?? 0), 0)
 const asEvidence = (value: FieldEvidence | FieldEvidence[] | undefined): FieldEvidence[] =>
   !value ? [] : Array.isArray(value) ? value : [value]
 
@@ -48,7 +51,7 @@ const mergeUploads = (uploads: Upload[]): CommercialProposal => uploads.filter((
     const value = next[key]
     if (typeof value === 'string' && value.trim() && (!update[key] || key === 'title' && update[key] === blank.title)) update[key] = value as never
   }
-  if (typeof next.documentTotal === 'number' && next.documentTotal > 0 && !update.documentTotal) update.documentTotal = next.documentTotal
+  if (typeof next.documentTotal === 'number' && next.documentTotal >= 0 && update.documentTotal === null) update.documentTotal = next.documentTotal
   update.notes = [current.notes, next.notes].filter((part): part is string => typeof part === 'string' && !!part.trim()).join('\n\n')
   update.items = [...current.items, ...(next.items ?? [])]
   return update
@@ -73,8 +76,9 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [models, setModels] = useState<ExtractionModel[]>(fallbackModels)
   const [selectionMode, setSelectionMode] = useState<'single' | 'compare'>('single')
-  const [selectedModels, setSelectedModels] = useState<string[]>(['gpt-5-mini'])
+  const [selectedModels, setSelectedModels] = useState<string[]>(['local'])
   const inputRef = useRef<HTMLInputElement>(null)
+  const editOriginal = useRef<CommercialProposal>(blank)
   const submissionKey = useRef(crypto.randomUUID())
   useEffect(() => {
     let active = true
@@ -105,7 +109,7 @@ function App() {
     }).catch(() => undefined)
     return () => { active = false }
   }, [authorized, sessionChecked])
-  const total = useMemo(() => proposal.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0), [proposal.items])
+  const total = useMemo(() => sumItems(proposal.items), [proposal.items])
 
   const changeSelectionMode = (mode: 'single' | 'compare') => {
     setSelectionMode(mode)
@@ -129,28 +133,23 @@ function App() {
     const acceptable = files.map((file, index) => ({ file, error: index >= 50 ? 'За одно чтение можно загрузить не больше 50 файлов' : file.size > 25 * 1024 * 1024 ? 'Файл превышает 25 МБ' : '' }))
     if (!acceptable.length) return
     setError('')
+    if (reading) return
     setReading(true)
+    setUploads([])
+    setProposal({ ...blank, items: [] })
+    setConfirmed(false)
     setSaved(null)
     submissionKey.current = crypto.randomUUID()
     try {
       const results = await mapWithLimit(acceptable, 1, async ({ file, error: sizeError }): Promise<Upload> => {
         if (sizeError) return { file, proposal: {}, metadata: { sourceName: file.name, parser: 'Проверка файла', status: 'error', confidence: 0, warnings: [sizeError] }, error: sizeError }
         try {
-          let result: ParseResult
-          if (canUseExtractionApi(file)) {
-            try { result = await parseWithExtractionApi(file, selectedModels) }
-            catch (cause) {
-              if (/\.(pdf|docx)$/i.test(file.name)) {
-                result = await parseDocument(file)
-                result.metadata.warnings.unshift(`AI-модели недоступны: ${cause instanceof Error ? cause.message : 'ошибка сервера'}. Использован локальный разбор.`)
-              }
-              else throw cause
-            }
-          } else result = await parseDocument(file)
+          if (!canUseExtractionApi(file)) throw new Error('Формат файла не поддерживается')
+          const result = await parseWithExtractionApi(file, selectedModels)
           return { file, proposal: result.proposal, metadata: result.metadata,
             error: result.metadata.status === 'error' || result.metadata.status === 'unsupported' || result.metadata.status === 'empty' ? result.metadata.warnings[0] : undefined }
         } catch (cause) {
-          return { file, proposal: {}, metadata: { sourceName: file.name, parser: 'AI OCR', status: 'error', confidence: 0, warnings: [cause instanceof Error ? cause.message : 'Не удалось обработать файл'] }, error: cause instanceof Error ? cause.message : 'Не удалось обработать файл' }
+          return { file, proposal: {}, metadata: { sourceName: file.name, parser: 'Локальное извлечение', status: 'error', confidence: 0, warnings: [cause instanceof Error ? cause.message : 'Не удалось обработать файл'] }, error: cause instanceof Error ? cause.message : 'Не удалось обработать файл' }
         }
       })
       setUploads(results)
@@ -193,20 +192,25 @@ function App() {
     reset(); setAuthorized(false)
   }
 
-  const conflicts = textFields.flatMap(([key, label]) => {
+  const conflicts = [...textFields, ['documentTotal', 'Итог документа'] as [keyof CommercialProposal, string]].flatMap(([key, label]) => {
     const values = uploads.flatMap((upload) => {
       const candidates = [
+        ...asEvidence(upload.metadata.fieldEvidence?.[key]).filter((e) => e.value !== undefined).map((e) => ({ proposal: { [key]: e.value }, source: upload.file.name })),
         { proposal: upload.proposal, source: `${upload.file.name} · итог` },
         ...(upload.metadata.modelRuns ?? []).filter((run) => run.status === 'parsed' && run.proposal).map((run) => ({ proposal: run.proposal!, source: `${upload.file.name} · ${run.name}` })),
       ]
       return candidates.flatMap(({ proposal: candidate, source }) => {
-        const value = candidate[key]
+        const raw = candidate[key as keyof typeof candidate]
+        const value = typeof raw === 'number' ? String(raw) : raw
         return !upload.error && typeof value === 'string' && value.trim() ? [{ value, file: source }] : []
       })
     })
     const uniqueValues = values.filter(({ value }, index) => values.findIndex((candidate) => candidate.value.trim().toLocaleLowerCase() === value.trim().toLocaleLowerCase()) === index)
     return uniqueValues.length > 1 ? [{ key, label, values: uniqueValues }] : []
   })
+  const itemEvidence = (item: CommercialProposal['items'][number]) => uploads.filter((upload) => !upload.error).flatMap((upload) => (upload.proposal.items ?? []).flatMap((original, index) =>
+    original.name === item.name && original.quantity === item.quantity && original.unitPrice === item.unitPrice && original.unit === item.unit
+      ? ['name', 'quantity', 'unit', 'unitPrice', 'lineTotal'].flatMap((key) => asEvidence(upload.metadata.fieldEvidence?.[`items.${index}.${key}`])) : []))
   const duplicateItems = proposal.items.filter((item, index) => proposal.items.findIndex((candidate) => candidate.name.trim().toLowerCase() === item.name.trim().toLowerCase()) !== index)
   const validation = [
     ...(!proposal.client.trim() ? ['Укажите клиента'] : []),
@@ -214,15 +218,15 @@ function App() {
     ...(!proposal.items.length ? ['Добавьте хотя бы одну позицию'] : []),
     ...proposal.items.flatMap((item, index) => [
       ...(!item.name.trim() ? [`Позиция ${index + 1}: не указано название`] : []),
-      ...(!(item.quantity > 0) ? [`${item.name || `Позиция ${index + 1}`}: количество должно быть больше нуля`] : []),
-      ...(!(item.unitPrice > 0) ? [`${item.name || `Позиция ${index + 1}`}: укажите цену больше нуля`] : []),
+      ...(!((item.quantity ?? 0) > 0) ? [`${item.name || `Позиция ${index + 1}`}: количество должно быть больше нуля`] : []),
+      ...((item.unitPrice === null || item.unitPrice < 0) ? [`${item.name || `Позиция ${index + 1}`}: укажите цену (не меньше нуля)`] : []),
     ]),
     ...(conflicts.some(({ key }) => !resolvedConflicts.includes(key)) ? [`Разрешите конфликты в полях: ${conflicts.filter(({ key }) => !resolvedConflicts.includes(key)).map(({ label }) => label).join(', ')}`] : []),
   ]
   const canConfirm = validation.length === 0
 
   const chooseConflict = (key: keyof CommercialProposal, value: string) => {
-    setProposal((current) => ({ ...current, [key]: value }))
+    setProposal((current) => ({ ...current, [key]: key === 'documentTotal' ? Number(value) : value }))
     setResolvedConflicts((current) => current.includes(key) ? current : [...current, key])
     submissionKey.current = crypto.randomUUID()
     setConfirmed(false); setSaved(null)
@@ -237,7 +241,6 @@ function App() {
     setProposal(mergeUploads(updatedUploads))
     setResolvedConflicts([]); setConfirmed(false); setSaved(null); submissionKey.current = crypto.randomUUID()
   }
-  const confirm = () => { if (canConfirm) { setEditing(false); setConfirmed(true) } }
   const send = async () => {
     setSubmitting(true); setError('')
     try {
@@ -250,9 +253,9 @@ function App() {
   const download = (kind: 'json' | 'csv') => {
     const content = kind === 'json'
       ? JSON.stringify({ proposal, sources: uploads.map(({ file, metadata }) => ({ name: file.name, metadata })), total }, null, 2)
-      : [['Наименование', 'Количество', 'Единица', 'Цена', 'Сумма'], ...proposal.items.map((item) => [item.name, item.quantity, item.unit, item.unitPrice, item.quantity * item.unitPrice])]
+      : [['Наименование', 'Количество', 'Единица', 'Цена', 'Сумма'], ...proposal.items.map((item) => [item.name, item.quantity, item.unit, item.unitPrice, itemSum(item)])]
         .map((row) => row.map((cell) => {
-          const value = String(cell)
+          const value = String(cell ?? '')
           const safe = /^[\s]*[=+@-]/.test(value) ? `'${value}` : value
           return `"${safe.replaceAll('"', '""')}"`
         }).join(';')).join('\r\n')
@@ -273,26 +276,27 @@ function App() {
         {uploads.length === 0 && !reading && <ModelSelector models={models} selected={selectedModels} mode={selectionMode} onModeChange={changeSelectionMode} onToggle={toggleModel} />}
         {uploads.length === 0 && !reading && <div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} onClick={() => inputRef.current?.click()}>
           <input ref={inputRef} type="file" multiple accept=".docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.pdf,.png,.jpg,.jpeg,.webp" onChange={onInput} />
-          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">PDF/DOCX читаются из текстового слоя, сканы распознаются Tesseract, затем данные структурируются через OpenAI API. Другие форматы разбираются в браузере. Исходные файлы не сохраняются.</small>
+          <div className="upload-icon">↑</div><strong>Перетащите документы сюда</strong><p>или <u>выберите файлы на компьютере</u></p><small>PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл</small><small className="privacy-note">Все документы обрабатываются локально на CPU. Tesseract читает сканы, правила и локальная Qwen выделяют поля. Документы и результаты не отправляются во внешние сервисы.</small>
         </div>}
-        {reading && <div className="analysis"><div className="spinner" /><h2>{selectedModels.length > 1 ? `Сравниваем ${selectedModels.length} модели` : 'Читаем документы'}</h2><p>Каждая модель последовательно извлекает поля и позиции. Длинные документы обрабатываются частями.</p><small className="active-models">{models.filter(({ id }) => selectedModels.includes(id)).map(({ name }) => name).join(' → ')}</small></div>}
+        {reading && <div className="analysis"><div className="spinner" /><h2>{selectedModels.length > 1 ? `Сравниваем ${selectedModels.length} модели` : 'Читаем документы'}</h2><p>Документы обрабатываются по одному. Для каждого найденного значения сохраняется источник.</p><small className="active-models">{models.filter(({ id }) => selectedModels.includes(id)).map(({ name }) => name).join(' → ')}</small></div>}
         {!reading && uploads.length > 0 && <>
           <div className="results-heading"><div><h2>Результаты распознавания</h2><p>{confirmed ? 'Данные проверены и готовы к сохранению.' : 'Проверьте источники, конфликты и поля перед сохранением.'}</p></div><div className="heading-actions">{confirmed && <span className="confirmed-badge">✓ Проверено</span>}<span className="file-count">{uploads.length} {uploads.length === 1 ? 'файл' : 'файлов'}</span></div></div>
           <div className="uploaded-results">{uploads.map(({ file, metadata, error: fileError }, index) => <div className="result-row" key={`${file.name}-${file.lastModified}-${index}`}>
             <button className="source-link" onClick={() => setPreviewFile(previewFile === `${file.name}-${index}` ? null : `${file.name}-${index}`)}>{file.name}</button>
             <span className={`status ${fileError ? 'warning' : 'done'}`}>{fileError ? fileError : `✓ ${metadata.parser} · ${Math.round(metadata.confidence * 100)}%${metadata.ocrPages ? ` · OCR страницы ${metadata.ocrPageNumbers?.join(', ')}` : ''}`}</span>
           </div>)}</div>
+          {uploads.some(({ metadata }) => metadata.warnings.length > 0) && <section className="validation-box"><strong>Предупреждения извлечения</strong>{uploads.map(({ file, metadata }) => metadata.warnings.map((warning, index) => <p className="validation-note" key={`${file.name}-${index}`}>{file.name}: {warning}</p>))}</section>}
           {previewFile && <SourcePreview upload={uploads.find(({ file }, index) => `${file.name}-${index}` === previewFile)!} />}
           {uploads.some(({ metadata }) => (metadata.modelRuns?.length ?? 0) > 1) && <ModelComparison uploads={uploads} currency={proposal.currency} onUse={useModelResult} />}
           {conflicts.length > 0 && <section className="conflict-panel"><h3>Найдены разные значения</h3><p>Выберите источник или сначала исправьте значение в редакторе, затем подтвердите его вручную.</p>{conflicts.map(({ key, label, values }) => <div className="conflict-choice" key={key}><label className="conflict-row">{label}<select value={String(proposal[key] ?? '')} onChange={(event) => chooseConflict(key, event.target.value)}>{values.map(({ value, file }, index) => <option value={value} key={`${file}-${index}`}>{value} — {file}</option>)}</select></label><button className="text-button" onClick={() => resolveConflictManually(key)}>Оставить текущее значение</button>{resolvedConflicts.includes(key) && <small className="resolved-conflict">Выбор подтверждён</small>}</div>)}</section>}
-          {editing ? <ProposalEditor proposal={proposal} onChange={(value) => { setProposal(value); setConfirmed(false); setSaved(null); submissionKey.current = crypto.randomUUID() }} onCancel={() => setEditing(false)} onConfirm={confirm} /> : <div className="proposal-data">
+          {editing ? <ProposalEditor proposal={proposal} onChange={(value) => { setProposal(value); setConfirmed(false); setSaved(null); submissionKey.current = crypto.randomUUID() }} onCancel={() => { setProposal(editOriginal.current); setEditing(false) }} onConfirm={() => setEditing(false)} /> : <div className="proposal-data">
             {textFields.map(([key, label]) => <DataField key={key} label={label} value={String(proposal[key] || 'Не найдено')} evidence={uploads.flatMap(({ metadata }) => asEvidence(metadata.fieldEvidence?.[key]))} />)}
             <DataField label="Итог по позициям" value={money(total, proposal.currency)} />
-            {proposal.documentTotal > 0 && <DataField label="Итог из документа" value={money(proposal.documentTotal, proposal.currency)} />}
-            {proposal.items.length > 0 && <div className="items-data"><h3>Позиции</h3>{proposal.items.map((item, index) => <div className={`item-data ${duplicateItems.includes(item) ? 'duplicate-item' : ''}`} key={`${item.name}-${index}`}><span>{item.name || 'Без названия'}{duplicateItems.includes(item) && <small> Возможный дубль из нескольких файлов</small>}</span><span>{item.quantity} {item.unit}</span><strong>{money(item.quantity * item.unitPrice, proposal.currency)}</strong></div>)}<div className="total-data"><span>Итого</span><strong>{money(total, proposal.currency)}</strong></div>{proposal.documentTotal > 0 && Math.abs(total - proposal.documentTotal) > 0.01 && <p className="validation-note">Сумма позиций отличается от суммы в документе на {money(Math.abs(total - proposal.documentTotal), proposal.currency)}. Проверьте НДС, скидку и доставку.</p>}</div>}
+            {proposal.documentTotal !== null && <DataField label="Итог из документа" value={money(proposal.documentTotal, proposal.currency)} evidence={uploads.flatMap(({ metadata }) => asEvidence(metadata.fieldEvidence?.documentTotal))} />}
+            {proposal.items.length > 0 && <div className="items-data"><h3>Позиции</h3>{proposal.items.map((item, index) => <div className={`item-data ${duplicateItems.includes(item) ? 'duplicate-item' : ''}`} key={`${item.name}-${index}`}><span>{item.name || 'Без названия'}{duplicateItems.includes(item) && <small> Возможный дубль из нескольких файлов</small>}</span><span>{item.quantity ?? 'Кол-во не найдено'} {item.unit}</span><strong>{money(itemSum(item), proposal.currency)}</strong><details><summary>Источники значений</summary>{itemEvidence(item).map((e, i) => <DataField key={i} label="Значение в исходном документе" value={String(e.value ?? e.excerpt)} evidence={[e]} />)}<small>Для изменённых вручную позиций исходные цитаты доступны в просмотре файла.</small></details></div>)}<div className="total-data"><span>Итого</span><strong>{money(total, proposal.currency)}</strong></div>{total !== null && proposal.documentTotal !== null && Math.abs((total ?? 0) - proposal.documentTotal) > 0.01 && <p className="validation-note">Сумма позиций отличается от суммы в документе на {money(Math.abs((total ?? 0) - proposal.documentTotal), proposal.currency)}. Проверьте НДС, скидку и доставку.</p>}</div>}
             {proposal.notes && <DataField label="Извлеченный текст документа" value={proposal.notes} multiline />}
             <div className="validation-box"><strong>{canConfirm ? 'Обязательные данные заполнены' : 'Что нужно проверить'}</strong>{validation.length > 0 && <ul>{validation.map((message) => <li key={message}>{message}</li>)}</ul>}</div>
-            <div className="data-actions"><button className="outline-cta" onClick={() => download('json')}>Скачать JSON</button><button className="outline-cta" onClick={() => download('csv')}>Скачать CSV</button><button className="outline-cta" onClick={() => setEditing(true)}>Изменить данные</button>{!confirmed && <button className="primary-cta" disabled={!canConfirm} onClick={() => setConfirmed(true)}>Подтвердить данные</button>}{confirmed && !saved && <button className="primary-cta" disabled={submitting} onClick={() => void send()}>{submitting ? 'Сохраняем…' : 'Сохранить на сервере'}</button>}</div>
+            <div className="data-actions"><button className="outline-cta" onClick={() => download('json')}>Скачать JSON</button><button className="outline-cta" onClick={() => download('csv')}>Скачать CSV</button><button className="outline-cta" onClick={() => { editOriginal.current = proposal; setEditing(true) }}>Изменить данные</button>{!confirmed && <button className="primary-cta" disabled={!canConfirm} onClick={() => setConfirmed(true)}>Подтвердить данные</button>}{confirmed && !saved && <button className="primary-cta" disabled={submitting} onClick={() => void send()}>{submitting ? 'Сохраняем…' : 'Сохранить на сервере'}</button>}</div>
             {saved && <div className="saved-message" role="status">Предложение сохранено · № {saved.id} · {new Date(saved.createdAt).toLocaleString('ru-RU')}</div>}
           </div>}
         </>}
@@ -309,7 +313,7 @@ function ModelSelector({ models, selected, mode, onModeChange, onToggle }: {
   onToggle: (model: string) => void
 }) {
   return <section className="model-selector">
-    <div className="model-selector-heading"><div><span className="step-label">ШАГ 1</span><h2>Модель распознавания</h2><p>Модель выбирается переменной OPENAI_MODEL на сервере.</p></div>{models.length > 1 && <div className="mode-switch" role="group" aria-label="Режим распознавания"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => onModeChange('single')}>Одна модель</button><button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => onModeChange('compare')}>Сравнить модели</button></div>}</div>
+    <div className="model-selector-heading"><div><span className="step-label">ШАГ 1</span><h2>Модель распознавания</h2><p>Явные поля извлекаются правилами. Локальная модель помогает с неоднозначными фрагментами; при её отсутствии отображается предупреждение.</p></div>{models.length > 1 && <div className="mode-switch" role="group" aria-label="Режим распознавания"><button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => onModeChange('single')}>Одна модель</button><button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => onModeChange('compare')}>Сравнить модели</button></div>}</div>
     <div className="model-grid">{models.map((model) => {
       const checked = selected.includes(model.id)
       return <button type="button" className={`model-card ${checked ? 'selected' : ''}`} onClick={() => onToggle(model.id)} aria-pressed={checked} key={model.id}>
@@ -326,7 +330,7 @@ function ModelComparison({ uploads, currency, onUse }: { uploads: Upload[]; curr
     if (runs.length < 2) return null
     return <div className="model-file" key={`${upload.file.name}-${uploadIndex}`}><strong>{upload.file.name}</strong><div className="model-run-grid">{runs.map((run) => {
       const items = run.proposal?.items ?? []
-      const runTotal = items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
+      const runTotal = sumItems(items)
       const fields = run.proposal ? textFields.filter(([key]) => Boolean(run.proposal?.[key])).length : 0
       return <article className={`model-run ${run.status}`} key={run.model}><div><b>{run.name}</b><span>{(run.durationMs / 1000).toFixed(1)} сек.</span></div>{run.status === 'parsed' ? <><p>{fields} полей · {items.length} позиций · уверенность {Math.round(run.confidence * 100)}%</p><strong>{money(runTotal, currency || String(run.proposal?.currency ?? ''))}</strong><button type="button" className="text-button" onClick={() => onUse(uploadIndex, run)}>Использовать этот результат</button></> : <p className="model-error">{run.error || 'Нет результата'}</p>}</article>
     })}</div></div>
@@ -343,19 +347,19 @@ function SourcePreview({ upload }: { upload: Upload }) {
 function ProposalEditor({ proposal, onChange, onCancel, onConfirm }: { proposal: CommercialProposal; onChange: (proposal: CommercialProposal) => void; onCancel: () => void; onConfirm: () => void }) {
   const update = <K extends keyof CommercialProposal>(key: K, value: CommercialProposal[K]) => onChange({ ...proposal, [key]: value })
   const updateItem = (index: number, key: 'name' | 'quantity' | 'unit' | 'unitPrice', value: string) => {
-    const items = proposal.items.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: key === 'name' || key === 'unit' ? value : Number(value) } : item)
+    const items = proposal.items.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: key === 'name' || key === 'unit' ? value : value === '' ? null : Number(value) } : item)
     update('items', items)
   }
   return <div className="proposal-editor"><div className="editor-grid">{textFields.map(([key, label]) => <label key={key}>{label}<input value={String(proposal[key] || '')} onChange={(event) => update(key, event.target.value as never)} /></label>)}</div>
-    <div className="editor-items-heading"><h3>Позиции</h3><button className="text-button" onClick={() => update('items', [...proposal.items, { name: '', quantity: 1, unit: 'шт.', unitPrice: 0 }])}>＋ Добавить</button></div>
-    {proposal.items.map((item, index) => <div className="editor-item" key={`${item.name}-${index}`}><input aria-label="Наименование" placeholder="Наименование" value={item.name} onChange={(event) => updateItem(index, 'name', event.target.value)} /><input aria-label="Количество" placeholder="Кол-во" type="number" min="0" step="any" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /><input aria-label="Единица измерения" placeholder="Ед." value={item.unit} onChange={(event) => updateItem(index, 'unit', event.target.value)} /><input aria-label="Цена за единицу" placeholder="Цена за ед." type="number" min="0" step="any" value={item.unitPrice} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /><button className="remove-item" aria-label="Удалить позицию" onClick={() => update('items', proposal.items.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>)}
-    <label className="notes-label">Текст документа<textarea rows={6} value={proposal.notes} onChange={(event) => update('notes', event.target.value)} /></label><label className="notes-label">Итог из документа<input type="number" min="0" step="any" value={proposal.documentTotal || ''} onChange={(event) => update('documentTotal', Number(event.target.value))} /></label>
+    <div className="editor-items-heading"><h3>Позиции</h3><button className="text-button" onClick={() => update('items', [...proposal.items, { name: '', quantity: null, unit: '', unitPrice: null }])}>＋ Добавить</button></div>
+    {proposal.items.map((item, index) => <div className="editor-item" key={index}><input aria-label="Наименование" placeholder="Наименование" value={item.name} onChange={(event) => updateItem(index, 'name', event.target.value)} /><input aria-label="Количество" placeholder="Кол-во" type="number" min="0" step="any" value={item.quantity ?? ''} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /><input aria-label="Единица измерения" placeholder="Ед." value={item.unit} onChange={(event) => updateItem(index, 'unit', event.target.value)} /><input aria-label="Цена за единицу" placeholder="Цена за ед." type="number" min="0" step="any" value={item.unitPrice ?? ''} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /><button className="remove-item" aria-label="Удалить позицию" onClick={() => update('items', proposal.items.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>)}
+    <label className="notes-label">Текст документа<textarea rows={6} value={proposal.notes} onChange={(event) => update('notes', event.target.value)} /></label><label className="notes-label">Итог из документа<input type="number" min="0" step="any" value={proposal.documentTotal ?? ''} onChange={(event) => update('documentTotal', event.target.value === '' ? null : Number(event.target.value))} /></label>
     <div className="data-actions"><button className="outline-cta" onClick={onCancel}>Отмена</button><button className="primary-cta" onClick={onConfirm}>Сохранить изменения</button></div>
   </div>
 }
 
 function DataField({ label, value, multiline = false, evidence = [] }: { label: string; value: string; multiline?: boolean; evidence?: FieldEvidence[] }) {
-  return <div className={`data-field ${multiline ? 'multiline' : ''}`}><span>{label}</span><strong>{value}</strong>{evidence.map((source, index) => <small className={source.verifiedInSource ? 'evidence' : 'evidence unverified'} key={`${source.file}-${index}`}>{source.file}{source.page ? ` · стр. ${source.page}` : ''}: «{source.excerpt}»{source.verifiedInSource ? '' : ' · точное совпадение не найдено'}</small>)}</div>
+  return <div className={`data-field ${multiline ? 'multiline' : ''}`}><span>{label}</span><strong>{value}</strong>{evidence.map((source, index) => <small className={source.verifiedInSource ? 'evidence' : 'evidence unverified'} key={`${source.file}-${index}`}>{source.file}{source.page ? ` · стр. ${source.page}` : ''}{source.sheet ? ` · лист ${source.sheet}` : ''}{source.row ? ` · строка ${source.row}, ячейка ${source.cell}` : ''}{source.method ? ` · ${source.method}` : ''}{source.confidence !== undefined ? ` · ${Math.round(source.confidence * 100)}%` : ''}: «{source.excerpt}»{source.warning ? ` · ${source.warning}` : ''}{source.verifiedInSource ? '' : ' · точное совпадение не найдено'}</small>)}</div>
 }
 
 export default App
