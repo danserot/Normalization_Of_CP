@@ -14,6 +14,7 @@ import type {
   ModelRun,
 } from "./lib/documentParser";
 import "./App.css";
+import AnnotationWorkspace from "./AnnotationWorkspace";
 
 type Upload = {
   file: File;
@@ -206,6 +207,7 @@ const mergeUploads = (uploads: Upload[]): CommercialProposal =>
     );
 
 function App() {
+  const [workspace, setWorkspace] = useState<"reader" | "annotation">("reader");
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [proposal, setProposal] = useState<CommercialProposal>(blank);
   const [error, setError] = useState("");
@@ -706,6 +708,8 @@ function App() {
       </main>
     );
 
+  if (workspace === "annotation") return <AnnotationWorkspace onBack={() => setWorkspace("reader")} />;
+
   return (
     <main className="reader">
       <header className="reader-header">
@@ -718,6 +722,9 @@ function App() {
           </p>
         </div>
         <div className="header-actions">
+          <button className="outline-cta" disabled={reading || submitting} onClick={() => setWorkspace("annotation")}>
+            Разметка для обучения
+          </button>
           {uploads.length > 0 && (
             <button className="outline-cta" onClick={reset}>
               Новое чтение

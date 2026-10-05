@@ -13,3 +13,8 @@ test-results
 backend/data
 .pytest_cache
 pytest-cache-files-*
+.playwright-cli
+output
+training/output
+training/data/kp_*.json
+training/data/raw

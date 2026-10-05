@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .extraction import FORMATS, MAX_BYTES, DocumentError
 from .local_model import MODEL_NAME, model_available
 from .pipeline import Pipeline
+from .annotations import create_annotation_router, initialize_annotations
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "./backend/data/readdocument.sqlite3"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
@@ -117,6 +118,7 @@ def initialize_db() -> None:
                 payload TEXT NOT NULL
             )"""
         )
+        initialize_annotations(connection)
 
 
 initialize_db()
@@ -141,6 +143,9 @@ def authenticated(request: Request) -> bool:
 def require_auth(request: Request) -> None:
     if not authenticated(request):
         raise HTTPException(status_code=401, detail="Войдите, чтобы продолжить")
+
+
+app.include_router(create_annotation_router(connect_db, require_auth, pipeline))
 
 
 @app.get("/api/health")

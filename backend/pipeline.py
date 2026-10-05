@@ -33,11 +33,15 @@ def process_document(content, filename):
 def worker(connection):
     while True:
         try:
-            content, filename = connection.recv()
+            content, filename, mode = connection.recv()
         except EOFError:
             return
         try:
-            result = process_document(content, filename)
+            if mode == 'annotation':
+                from .annotation_data import prepare_annotation
+                result = prepare_annotation(content, filename)
+            else:
+                result = process_document(content, filename)
             connection.send(('ok', result))
         except DocumentError as error:
             connection.send(('error', str(error)))
@@ -77,7 +81,7 @@ class Pipeline:
             self.connection.close()
             self.connection = None
 
-    async def run(self, content, filename):
+    async def run(self, content, filename, mode='extract'):
         if not self.process or not self.process.is_alive():
             self.stop()
             context = mp.get_context('spawn')
@@ -87,7 +91,7 @@ class Pipeline:
             child.close()
         started = time.monotonic()
         try:
-            await asyncio.to_thread(self.connection.send, (content, filename))
+            await asyncio.to_thread(self.connection.send, (content, filename, mode))
             while not self.connection.poll():
                 if time.monotonic() - started > DEADLINE or not self.process.is_alive():
                     self.stop()
