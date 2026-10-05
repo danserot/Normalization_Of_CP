@@ -1,0 +1,107 @@
+{
+  "offer.csv": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.docx": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.jpg": {
+    "status": "unavailable",
+    "reason": "Tesseract is not installed in this environment"
+  },
+  "offer.json": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.pdf": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.png": {
+    "status": "unavailable",
+    "reason": "Tesseract is not installed in this environment"
+  },
+  "offer.tsv": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.txt": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.webp": {
+    "status": "unavailable",
+    "reason": "Tesseract is not installed in this environment"
+  },
+  "offer.xls": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.xlsx": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Excel: формулы читаются из сохранённого результата; пустой кэш остаётся пустым",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer-scan.pdf": {
+    "status": "unavailable",
+    "reason": "Tesseract is not installed in this environment"
+  }
+}

@@ -59,7 +59,7 @@ def test_worker_hard_deadline_and_recovery(monkeypatch):
     instance = Pipeline()
     try:
         monkeypatch.setattr(module, 'DEADLINE', -.1)
-        with pytest.raises(DocumentError, match='180 секунд'):
+        with pytest.raises(DocumentError, match='Обработка остановлена'):
             asyncio.run(instance.run(b'Client: Alpha', 'text.txt'))
         assert instance.process is None
         monkeypatch.setattr(module, 'DEADLINE', 180)

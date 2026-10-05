@@ -28,6 +28,19 @@ SESSION_LIFETIME = 8 * 60 * 60
 pipeline = Pipeline()
 
 
+class AdditionalField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(max_length=200)
+    value: str = Field(max_length=2000)
+
+
+class CostComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(max_length=500)
+    unitPrice: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    lineTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
 class ProposalItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=500)
@@ -35,6 +48,8 @@ class ProposalItem(BaseModel):
     unit: str = Field(max_length=50)
     unitPrice: float = Field(ge=0, allow_inf_nan=False)
     lineTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    components: list[CostComponent] = Field(default_factory=list, max_length=10)
+    additionalFields: list[AdditionalField] = Field(default_factory=list, max_length=30)
 
 
 class ProposalData(BaseModel):
@@ -56,6 +71,7 @@ class ProposalData(BaseModel):
     documentTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     notes: str = Field(max_length=500_000)
     items: list[ProposalItem] = Field(max_length=2000)
+    additionalFields: list[AdditionalField] = Field(default_factory=list, max_length=100)
 
 
 class ProposalSubmission(BaseModel):
@@ -137,7 +153,7 @@ async def health() -> dict:
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
     return {"models": [{"id": "local", "name": "Локальное извлечение",
-        "description": "Правила, Tesseract и Qwen для неоднозначных фрагментов",
+        "description": "Модель определяет структуру КП, проверяет источник и полноту; при недоступности — резервный разбор",
         "size": "CPU · без внешних API", "recommended": True,
         "installed": await asyncio.to_thread(model_available)}]}
 
@@ -208,7 +224,7 @@ async def save_proposal(payload: ProposalSubmission, idempotency_key: str | None
         raise HTTPException(status_code=400, detail="Некорректный ключ отправки") from error
     identifier = str(UUID(bytes=os.urandom(16), version=4))
     created_at = datetime.now(timezone.utc).isoformat()
-    serialized = json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, allow_nan=False)
+    serialized = json.dumps(payload.model_dump(mode="json", exclude_unset=True), ensure_ascii=False, allow_nan=False)
     try:
         with connect_db() as connection:
             connection.execute(

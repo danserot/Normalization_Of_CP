@@ -1,0 +1,141 @@
+{
+  "offer.csv": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.docx": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.jpg": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Страница 1, строка 12: OCR числа перепроверен по изображению и сумме строки (S → 3)",
+      "Страница 1: OCR, сверьте значения и таблицы с оригиналом",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 1
+  },
+  "offer.json": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.pdf": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.png": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Страница 1, строка 6: OCR валюты перепроверен по изображению (Валюта: КИТ → Валюта: KZT)",
+      "Страница 1: OCR, сверьте значения и таблицы с оригиналом",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 1
+  },
+  "offer.tsv": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.txt": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.webp": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Страница 1: OCR, сверьте значения и таблицы с оригиналом",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 1
+  },
+  "offer.xls": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer.xlsx": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Excel: формулы читаются из сохранённого результата; пустой кэш остаётся пустым",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 0
+  },
+  "offer-scan.pdf": {
+    "status": "pass",
+    "fields_correct": 22,
+    "fields_total": 22,
+    "mismatches": {},
+    "missing_evidence": [],
+    "warnings": [
+      "Страница 1: OCR, сверьте значения и таблицы с оригиналом",
+      "Локальная модель недоступна или выключена; использованы только локальные правила"
+    ],
+    "ocr_pages": 1
+  }
+}

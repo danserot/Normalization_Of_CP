@@ -1,0 +1,10 @@
+{
+  "kp_train": {
+    "file_name": "kp_train.json",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
+  },
+  "kp_val": {
+    "file_name": "kp_val.json",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
+  }
+}

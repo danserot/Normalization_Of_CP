@@ -14,6 +14,8 @@ import pytesseract
 from docx import Document
 from PIL import Image, ImageOps
 
+from .rules import parse_number
+
 FORMATS = {'.pdf', '.docx', '.xlsx', '.xls', '.csv', '.tsv', '.txt', '.json', '.png', '.jpg', '.jpeg', '.webp'}
 MAX_BYTES = 25 * 1024**2
 MAX_PAGES = 50
@@ -21,7 +23,7 @@ MAX_CHARS = 200_000
 MAX_CELLS = 30_000
 MAX_SIDE = 2400
 MAX_PIXELS = 20_000_000
-DEADLINE = 180
+DEADLINE = min(600, max(30, int(os.getenv('EXTRACTION_TIMEOUT_SECONDS', '480'))))
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 
@@ -54,11 +56,13 @@ class Source:
 
     def check(self):
         if time.monotonic() - self.started > DEADLINE:
-            raise DocumentError('Превышено время обработки (180 секунд)')
+            raise DocumentError(f'Превышено время обработки ({DEADLINE} секунд)')
 
     def add(self, text, block, row, cell=1, **location):
         self.check()
-        text = str(text if text is not None else '').strip()
+        # PDF font encodings can map a visible hyphen to U+00AD (soft hyphen).
+        # Normalize it before matching document numbers and source evidence.
+        text = str(text if text is not None else '').replace('\u00ad', '-').strip()
         self.chars += len(text)
         if self.chars > MAX_CHARS or len(self.cells) >= MAX_CELLS:
             raise DocumentError('Документ превышает лимит 200 000 символов / 30 000 ячеек')
@@ -107,7 +111,10 @@ def ocr(source, original, page):
         image = image.resize((int(image.width * scale), int(image.height * scale)))
     image = ImageOps.autocontrast(ImageOps.grayscale(image))
     lang = os.getenv('TESSERACT_LANG', 'rus+eng')
-    available = pytesseract.get_languages(config='')
+    try:
+        available = pytesseract.get_languages(config='')
+    except pytesseract.TesseractNotFoundError as error:
+        raise DocumentError('Tesseract не установлен: для изображений и сканов требуется OCR') from error
     if any(part not in available for part in lang.split('+')):
         raise DocumentError(f'Не установлены языки Tesseract: {lang}')
     try:
@@ -129,6 +136,25 @@ def ocr(source, original, page):
         if not groups or abs(groups[-1][0] - center) > max(8, data['height'][i] * .6):
             groups.append((center, []))
         groups[-1][1].append(i)
+    numeric_columns = {}
+
+    def reread(indices, language, config):
+        x = min(data['left'][i] for i in indices)
+        y = min(data['top'][i] for i in indices)
+        right = max(data['left'][i] + data['width'][i] for i in indices)
+        bottom = max(data['top'][i] + data['height'][i] for i in indices)
+        crop = image.crop((max(0, x - 7), max(0, y - 7), min(image.width, right + 7), min(image.height, bottom + 7)))
+        try:
+            enlarged = crop.resize((crop.width * 4, crop.height * 4))
+            try:
+                return pytesseract.image_to_string(enlarged, lang=language, config=config, timeout=8).strip()
+            finally:
+                enlarged.close()
+        except (pytesseract.TesseractError, RuntimeError):
+            return ''
+        finally:
+            crop.close()
+
     for row, (_, indices) in enumerate(groups, 1):
         # Gaps retain approximate table cell boundaries; uncertain layouts go to model/manual review.
         chunks, last_right = [], None
@@ -138,13 +164,45 @@ def ocr(source, original, page):
                 chunks.append([])
             chunks[-1].append(i)
             last_right = left + data['width'][i]
+        row_cells = []
         for col, chunk in enumerate(chunks, 1):
             x = min(data['left'][i] for i in chunk)
             y = min(data['top'][i] for i in chunk)
             right = max(data['left'][i] + data['width'][i] for i in chunk)
             bottom = max(data['top'][i] + data['height'][i] for i in chunk)
-            source.add(' '.join(data['text'][i] for i in chunk), f'page-{page}', row, col,
-                       page=page, method='ocr', bbox=[x, y, right, bottom])
+            row_cells.append([col, chunk, ' '.join(data['text'][i] for i in chunk), [x, y, right, bottom]])
+
+        labels = {col: re.sub(r'[^\w]+', ' ', value.casefold()).strip() for col, _, value, _ in row_cells}
+        if any(label in ('наименование', 'name', 'description') for label in labels.values()):
+            numeric_columns = {col: role for col, label in labels.items() for role, names in {
+                'quantity': ('количество', 'кол во', 'кол', 'qty', 'quantity'),
+                'unitPrice': ('цена', 'цена за ед', 'price', 'unitprice'),
+                'lineTotal': ('сумма', 'стоимость', 'итого', 'total'),
+            }.items() if label in names}
+        elif row_cells and re.match(r'^(итого|всего|к оплате)(?:\s|:|$)', row_cells[0][2], re.I):
+            numeric_columns = {}
+
+        values = {numeric_columns[col]: parse_number(value) for col, _, value, _ in row_cells if col in numeric_columns}
+        for col, chunk, value, bbox in row_cells:
+            if re.match(r'^(валюта|currency)\s*:', value, re.I) and len(chunk) > 1 and not re.search(r'\b(KZT|USD|EUR|RUB|TRY)\b', value):
+                candidate = reread([chunk[-1]], 'eng', '--psm 7')
+                match = re.search(r'\b(KZT|USD|EUR|RUB|TRY)\b', candidate, re.I)
+                if match and match.group(1).upper() not in value:
+                    original = value
+                    value = re.sub(r'(:\s*).+$', lambda m: m.group(1) + match.group(1).upper(), value)
+                    source.warnings.append(f'Страница {page}, строка {row}: OCR валюты перепроверен по изображению ({original} → {value})')
+            role = numeric_columns.get(col)
+            if role and value and parse_number(value) is None:
+                candidate = reread(chunk, 'eng', '--psm 10 -c tessedit_char_whitelist=0123456789.,')
+                number = parse_number(candidate)
+                if number is not None and number >= 0:
+                    amounts = {**values, role: number}
+                    if all(amounts.get(key) is not None for key in ('quantity', 'unitPrice', 'lineTotal')) and abs(
+                        amounts['quantity'] * amounts['unitPrice'] - amounts['lineTotal']
+                    ) <= .02:
+                        source.warnings.append(f'Страница {page}, строка {row}: OCR числа перепроверен по изображению и сумме строки ({value} → {candidate})')
+                        value = candidate
+            source.add(value, f'page-{page}', row, col, page=page, method='ocr', bbox=bbox)
     source.ocr_pages.append(page)
     source.warnings.append(f'Страница {page}: OCR, сверьте значения и таблицы с оригиналом')
     image.close()
@@ -224,9 +282,14 @@ def read_document(content: bytes, filename: str) -> Source:
                 if len(workbook.worksheets) > 30:
                     raise DocumentError('Превышен лимит 30 листов')
                 for sheet in workbook:
-                    if sheet.max_row > 10000 or sheet.max_column > 100:
+                    if (sheet.max_row or 0) > 10000 or (sheet.max_column or 0) > 100:
                         raise DocumentError('Лист превышает 10 000 строк / 100 колонок')
+                    # Worksheet dimensions are optional and may also be stale.
+                    # Stream the actual XML rows instead of trusting this hint.
+                    sheet.reset_dimensions()
                     for row_no, values in enumerate(sheet.iter_rows(values_only=True), 1):
+                        if row_no > 10000 or len(values) > 100:
+                            raise DocumentError('Лист превышает 10 000 строк / 100 колонок')
                         for col, value in enumerate(values, 1):
                             source.add(value, f'sheet-{sheet.title}', row_no, col, sheet=sheet.title)
                 source.warnings.append('Excel: формулы читаются из сохранённого результата; пустой кэш остаётся пустым')

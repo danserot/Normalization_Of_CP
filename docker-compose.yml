@@ -17,6 +17,8 @@ services:
       dockerfile: backend/Dockerfile
     environment:
       LOCAL_MODEL_ENABLED: ${LOCAL_MODEL_ENABLED:-true}
+      LOCAL_VISION_ENABLED: ${LOCAL_VISION_ENABLED:-false}
+      EXTRACTION_TIMEOUT_SECONDS: ${EXTRACTION_TIMEOUT_SECONDS:-480}
       TESSERACT_LANG: ${TESSERACT_LANG:-rus+eng}
       OMP_THREAD_LIMIT: "2"
       DATABASE_PATH: /data/readdocument.sqlite3
@@ -38,10 +40,10 @@ services:
     depends_on: [backend]
     volumes:
       - ./models:/models:ro
-    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "2048", "-np", "1", "-t", "2", "-ngl", "0", "-b", "128", "-ub", "128"]
+    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128"]
     mem_limit: 1900m
     memswap_limit: 1900m
-    cpus: 2
+    cpus: 4
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8081/health"]
       interval: 15s

@@ -1,0 +1,37 @@
+# Run from training/ after installing LLaMA-Factory in a separate Linux environment.
+# data/kp_train.json and data/kp_val.json must contain human-reviewed examples.
+model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+quantization_bit: 4
+quantization_method: bitsandbytes
+template: qwen
+dataset_dir: data
+dataset: kp_train
+eval_dataset: kp_val
+cutoff_len: 2048
+packing: false
+train_on_prompt: false
+output_dir: output/qwen-kp-r16
+logging_dir: output/qwen-kp-r16/tensorboard
+overwrite_output_dir: false
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+gradient_checkpointing: true
+learning_rate: 0.0001
+num_train_epochs: 2
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+fp16: true
+logging_steps: 5
+save_strategy: epoch
+eval_strategy: epoch
+save_total_limit: 2
+report_to: tensorboard
+seed: 42

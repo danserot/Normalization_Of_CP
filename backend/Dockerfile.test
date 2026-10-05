@@ -2,5 +2,6 @@ FROM readdocument-backend:latest
 COPY backend/requirements-test.txt backend/requirements-test.txt
 RUN pip install --no-cache-dir -r backend/requirements-test.txt
 COPY backend ./backend
+COPY examples/mock_kp ./examples/mock_kp
 ENV TEST_OCR=1 LOCAL_MODEL_ENABLED=false
 CMD ["python", "-m", "pytest", "backend/tests", "-q"]

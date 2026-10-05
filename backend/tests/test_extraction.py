@@ -1,4 +1,7 @@
 import os
+import re
+import zipfile
+from io import BytesIO
 from unittest.mock import patch
 
 import pytest
@@ -139,3 +142,50 @@ def test_column_permutations(columns):
     values = {'name': 'Кабель', 'quantity': '2', 'unitPrice': '100'}
     text = ';'.join(columns) + '\n' + ';'.join(values[c] for c in columns)
     assert process_document(text.encode(), 'test.csv')['proposal']['items'][0]['unitPrice'] == 100
+
+
+@pytest.mark.parametrize('dimension', ['', '<dimension ref="A1:A1"/>'])
+def test_xlsx_without_reliable_dimensions(fixtures, dimension):
+    output = BytesIO()
+    with zipfile.ZipFile(fixtures / 'offer.xlsx') as original, zipfile.ZipFile(output, 'w') as rewritten:
+        for entry in original.infolist():
+            data = original.read(entry.filename)
+            if entry.filename.startswith('xl/worksheets/sheet'):
+                data = re.sub(rb'<dimension\b[^>]*/>', dimension.encode(), data)
+            rewritten.writestr(entry, data)
+    result = process_document(output.getvalue(), 'no-dimensions.xlsx')
+    assert len(result['proposal']['items']) == 2
+    assert result['proposal']['items'][0]['unitPrice'] == 1234.56
+    assert result['metadata']['fieldEvidence']['items.1.name']['sheet'] == 'Услуги'
+
+
+@pytest.mark.parametrize('row,col', [(10001, 1), (1, 101)])
+def test_xlsx_unknown_dimensions_still_enforces_limits(row, col):
+    from openpyxl import Workbook
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet()
+    for _ in range(row - 1):
+        sheet.append([])
+    sheet.append([None] * (col - 1) + ['data'])
+    output = BytesIO()
+    workbook.save(output)
+    with pytest.raises(DocumentError, match='10 000 строк / 100 колонок'):
+        read_document(output.getvalue(), 'limits.xlsx')
+
+
+def test_xlsx_footer_after_eight_items_is_not_ninth_item():
+    from openpyxl import Workbook
+    workbook = Workbook(write_only=True)  # Valid XLSX without a dimension element.
+    sheet = workbook.create_sheet()
+    sheet.append(['№', 'Наименование', 'Кол-во', 'Ед. изм.', 'Цена за ед., ₸', 'Сумма, ₸'])
+    for index in range(8):
+        sheet.append([index + 1, f'Товар {index + 1}', 2, 'шт.', 100, 200])
+    sheet.append(['ИТОГО:', None, None, None, None, 1600])
+    sheet.append(['Контактное лицо', 'Тестовый контакт'])
+    sheet.append(['Отдел продаж', 'Служебные сведения'])
+    output = BytesIO()
+    workbook.save(output)
+    result = process_document(output.getvalue(), 'eight-items.xlsx')
+    assert len(result['proposal']['items']) == 8
+    assert result['proposal']['documentTotal'] == 1600
+    assert result['proposal']['clientContact'] == 'Тестовый контакт'

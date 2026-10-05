@@ -9,7 +9,7 @@ from datetime import datetime
 FIELDS = {
     'title': ['название', 'тема', 'title'],
     'client': ['клиент', 'заказчик', 'покупатель', 'client', 'customer'],
-    'clientContact': ['контакт', 'контакты', 'телефон', 'email', 'e-mail', 'clientContact'],
+    'clientContact': ['контактное лицо', 'контакт', 'контакты', 'телефон', 'email', 'e-mail', 'clientContact'],
     'validUntil': ['действительно до', 'срок действия', 'предложение действительно до', 'validUntil'],
     'supplier': ['поставщик', 'исполнитель', 'продавец', 'supplier', 'жеткізуші'],
     'currency': ['валюта', 'currency'], 'vat': ['ндс', 'налог', 'vat'],
@@ -100,6 +100,8 @@ def extract_rules(source):
         proposal[key], proof[key] = value, evidence(cell, value)
 
     for row_key, cells in rows.items():
+        if row_key in used_rows:
+            continue
         block, row_no = row_key
         mapping = {}
         for cell in cells:
@@ -112,6 +114,10 @@ def extract_rules(source):
             continue
         joined = ' '.join(c.text for c in cells if c.text)
         is_total = bool(re.match(r'^(итого|всего|к оплате|общая сумма|subtotal|total)(?:\s|:|$)', joined, re.I))
+        if is_total:
+            # Requisites below the total are outside the items table. A later
+            # table must supply its own header before item parsing resumes.
+            mappings.pop(block, None)
         is_metadata = any(re.match(r'^' + re.escape(label) + r'(?:\s*[:=]|\s+)', joined, re.I)
                           for labels in FIELDS.values() for label in labels)
         if block in mappings and not is_total and not is_metadata:
@@ -179,6 +185,10 @@ def validate(proposal, proof, warnings):
                 for entry in entries if isinstance(entries, list) else [entries]:
                     entry['warning'] = warning
     for index, item in enumerate(proposal['items']):
+        for component in item.get('components', []):
+            quantity, price, amount = item['quantity'], component['unitPrice'], component['lineTotal']
+            if quantity is not None and price is not None and amount is not None and abs(quantity * price - amount) > .02:
+                warnings.append(f'Позиция {index + 1}, {component["label"]}: количество × цена отличается от суммы компонента')
         if item['quantity'] is None or item['unitPrice'] is None:
             warnings.append(f'Позиция {index + 1}: количество или цена отсутствует; заполните вручную')
         elif item.get('lineTotal') is not None:

@@ -10,6 +10,9 @@ lerna-debug.log*
 node_modules
 .venv/
 models/
+training/output/
+training/data/kp_*.json
+training/data/raw/
 runtime/
 __pycache__/
 test-results/

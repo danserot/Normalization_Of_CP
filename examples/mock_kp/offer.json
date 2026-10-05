@@ -1,0 +1,30 @@
+{
+  "client": "ТОО Северный Вектор",
+  "clientContact": "Айжан М.",
+  "supplier": "ТОО Орион Снаб",
+  "validUntil": "31.10.2026",
+  "currency": "KZT",
+  "vat": "включён 12%",
+  "paymentTerms": "50% предоплата",
+  "deliveryTerms": "7 рабочих дней",
+  "title": "Коммерческое предложение № КП-107 от 30.09.2026",
+  "documentNumber": "КП-107",
+  "documentDate": "30.09.2026",
+  "documentTotal": 3700,
+  "items": [
+    {
+      "name": "Кабель медный",
+      "unit": "м",
+      "quantity": 2,
+      "unitPrice": 1250,
+      "lineTotal": 2500
+    },
+    {
+      "name": "Кронштейн стальной",
+      "unit": "шт.",
+      "quantity": 3,
+      "unitPrice": 400,
+      "lineTotal": 1200
+    }
+  ]
+}
