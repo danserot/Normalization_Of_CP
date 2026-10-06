@@ -8,6 +8,11 @@ __pycache__
 .env
 .env.*
 models
+files
+manifest.csv
+manifest.jsonl
+README.txt
+private_training
 runtime
 test-results
 backend/data

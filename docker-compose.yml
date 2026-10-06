@@ -40,7 +40,7 @@ services:
     depends_on: [backend]
     volumes:
       - ./models:/models:ro
-    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128"]
+    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128", "--log-disable", "--no-webui"]
     mem_limit: 1900m
     memswap_limit: 1900m
     cpus: 4

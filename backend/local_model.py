@@ -8,7 +8,7 @@ import httpx
 from .rules import FIELDS, evidence, grouped_rows, parse_number
 
 MODEL_ID = 'local'
-MODEL_NAME = 'Qwen2.5-1.5B-Instruct Q4_K_M'
+MODEL_NAME = os.getenv('LOCAL_MODEL_NAME', 'Qwen2.5-1.5B-Instruct Q4_K_M')
 LOCAL_URL = 'http://127.0.0.1:8081'
 SCHEMA = {
     'type': 'object', 'properties': {

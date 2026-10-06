@@ -10,6 +10,11 @@ lerna-debug.log*
 node_modules
 .venv/
 models/
+files/
+manifest.csv
+manifest.jsonl
+README.txt
+private_training/
 training/output/
 training/data/kp_*.json
 training/data/raw/

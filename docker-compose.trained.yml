@@ -1,0 +1,12 @@
+# Activate only after checking training, conversion and held-out evaluation reports.
+# docker compose -f docker-compose.yml -f docker-compose.trained.yml --profile model up -d
+services:
+  backend:
+    environment:
+      LOCAL_MODEL_NAME: Qwen3-1.7B local LoRA Q4_K_M (experimental Layout)
+  model:
+    volumes:
+      - ./private_training/gguf:/trained:ro
+    command: ["-m", "/trained/model-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128", "--reasoning", "off", "--chat-template-kwargs", '{"enable_thinking":false}', "--log-disable", "--no-webui"]
+    mem_limit: 2400m
+    memswap_limit: 2400m

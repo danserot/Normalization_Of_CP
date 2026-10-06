@@ -17,6 +17,7 @@ export type AnnotationDocument = AnnotationSummary & {
   cells: SourceCell[]; annotation: Annotation; warnings: string[]; parseError: string;
   preview: { kind: "pdf" | "image" | "word" | "text" | "table"; pages?: number; text?: string };
   duplicate?: boolean;
+  automation?: { status: string; humanReviewed: boolean; split: string; reasons: string[] };
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
