@@ -16,9 +16,11 @@ from PIL import Image, ImageOps
 
 from .annotation_data import Annotation, SaveAnnotation, group_split, training_examples, validate_annotation
 from .extraction import FORMATS, MAX_BYTES, DocumentError
+from .pipeline import QueueFullError
 
 
 def initialize_annotations(connection):
+    connection.execute('CREATE TABLE IF NOT EXISTS training_exclusions (document_sha256 TEXT PRIMARY KEY, reasons TEXT NOT NULL)')
     connection.execute('''CREATE TABLE IF NOT EXISTS annotations (
         id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,
         original BLOB NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -67,16 +69,18 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                 row = connection.execute('SELECT id,fingerprint,filename,created_at,updated_at,revision,status,payload,annotation FROM annotations WHERE fingerprint = ?', (fingerprint,)).fetchone()
             if row:
                 return {**public_row(row, True), 'duplicate': True}
-            if pipeline.busy:
-                raise HTTPException(429, 'Дождитесь завершения текущего чтения документа', headers={'Retry-After': '5'})
-            pipeline.busy = True
             try:
                 payload = await pipeline.run(content, filename, mode='annotation')
+            except QueueFullError as error:
+                raise HTTPException(429, str(error), headers={'Retry-After': '5'}) from error
             except DocumentError as error:
                 raise HTTPException(422, str(error)) from error
-            finally:
-                pipeline.busy = False
             annotation = payload.pop('annotation')
+            with connect_db() as connection:
+                exclusion = connection.execute('SELECT reasons FROM training_exclusions WHERE document_sha256=?',
+                                               (hashlib.sha256(content).hexdigest(),)).fetchone()
+            if exclusion:
+                payload['automation'] = {'quarantined': True, 'quarantineReasons': json.loads(exclusion['reasons'])}
             identifier, now = str(uuid4()), datetime.now(timezone.utc).isoformat()
             with connect_db() as connection:
                 connection.execute('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -91,7 +95,8 @@ def create_annotation_router(connect_db, require_auth, pipeline):
         with connect_db() as connection:
             # One consistent snapshot; never load hundreds of original BLOBs into RAM.
             connection.execute('BEGIN')
-            if not connection.execute("SELECT 1 FROM annotations WHERE status='reviewed' LIMIT 1").fetchone():
+            if not any(not json.loads(row['payload']).get('automation', {}).get('quarantined')
+                       for row in connection.execute("SELECT payload FROM annotations WHERE status='reviewed'")):
                 raise HTTPException(422, 'Сначала сохраните хотя бы один проверенный документ')
             counts = {'train': 0, 'val': 0, 'test': 0}
             manifest, buffer = [], BytesIO()
@@ -106,6 +111,8 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                             if group_split(annotation.group) != split:
                                 continue
                             payload = json.loads(row['payload'])
+                            if payload.get('automation', {}).get('quarantined'):
+                                continue
                             validate_annotation(annotation, payload, row['filename'], True)
                             samples = training_examples(annotation, payload, row['filename'])
                             manifest.append({'id': row['id'], 'filename': row['filename'], 'fingerprint': row['fingerprint'],

@@ -12,6 +12,7 @@ from .inference import explicit_fields
 from .pipeline import ROOT, load
 from .privacy import atomic_json, emit, require_isolation, silent_libraries
 from .quality import check_annotation
+from .exclusions import excluded_ids
 
 
 def rule_annotation(payload, group):
@@ -86,6 +87,8 @@ def rule_annotation(payload, group):
 def main():
     require_isolation()
     assignment = load(ROOT / 'partition.json')['documents']
+    excluded = excluded_ids()
+    assignment = {k: v for k, v in assignment.items() if k not in excluded}
     counts = collections.Counter()
     reasons = collections.Counter()
     accepted_by_split = collections.Counter()

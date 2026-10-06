@@ -24,7 +24,9 @@ def test_api_bad_file_and_recovery(client):
     assert client.post('/api/extract', files={'file': ('test.pdf', b'bad')}).status_code == 422
     response = client.post('/api/extract', files={'file': ('test.txt', 'Клиент: Альфа'.encode())})
     assert response.status_code == 200
-    assert response.json()['proposal']['client'] == 'Альфа'
+    assert response.json()['proposal']['client'] == ''
+    assert response.json()['metadata']['verification']['mode'] == 'model_error'
+    assert response.json()['metadata']['outcome']['state'] == 'unavailable'
     assert any('модель недоступна' in w for w in response.json()['metadata']['warnings'])
 
 
@@ -64,6 +66,7 @@ def test_worker_hard_deadline_and_recovery(monkeypatch):
         assert instance.process is None
         monkeypatch.setattr(module, 'DEADLINE', 180)
         result = asyncio.run(instance.run(b'Client: Alpha', 'text.txt'))
-        assert result['proposal']['client'] == 'Alpha'
+        assert result['proposal']['client'] == ''
+        assert result['metadata']['verification']['mode'] == 'model_error'
     finally:
         instance.stop()

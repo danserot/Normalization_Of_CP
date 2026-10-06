@@ -1,6 +1,6 @@
 export type SourceCell = {
   id: string; file: string; text: string; block: string; row: number; cell: number;
-  page?: number | null; sheet?: string | null; method: string;
+  page?: number | null; sheet?: string | null; kind?: "text" | "table"; method: string;
 };
 export type MarkedField = { field: string; state: "pending" | "found" | "missing"; cell: string; value: string };
 export type MarkedTable = {
@@ -17,7 +17,7 @@ export type AnnotationDocument = AnnotationSummary & {
   cells: SourceCell[]; annotation: Annotation; warnings: string[]; parseError: string;
   preview: { kind: "pdf" | "image" | "word" | "text" | "table"; pages?: number; text?: string };
   duplicate?: boolean;
-  automation?: { status: string; humanReviewed: boolean; split: string; reasons: string[] };
+  automation?: { status?: string; humanReviewed?: boolean; split?: string; reasons?: string[]; quarantined?: boolean; quarantineReasons?: string[] };
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

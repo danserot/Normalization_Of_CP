@@ -1,5 +1,6 @@
 """Small resumable QLoRA loop; no cloud callbacks and no decoded samples in logs."""
 import argparse
+import collections
 import gc
 import hashlib
 import json
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 
 from .privacy import atomic_json, emit, require_isolation, silent_libraries
+from .exclusions import assert_training_allowed
 
 ROOT = Path('/private')
 
@@ -35,6 +37,15 @@ def main():
     parser.add_argument('--accumulation', type=int, default=8)
     args = parser.parse_args()
     require_isolation()
+    assert_training_allowed()
+    human_counts = collections.Counter()
+    manifest_path = ROOT / 'datasets' / 'manifest.json'
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        human_counts.update(row.get('split') for row in manifest
+                            if row.get('provenance') == 'human_reviewed' and row.get('split') in ('train', 'val', 'test'))
+    if not args.smoke and (human_counts['train'] < 20 or human_counts['val'] < 5 or human_counts['test'] < 5):
+        raise RuntimeError('E_INSUFFICIENT_HUMAN_GOLD')
     import torch
     from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -169,7 +180,8 @@ def main():
               'gpu_peak_mb': round(torch.cuda.max_memory_allocated() / 1024**2),
               'seconds': round(time.monotonic() - started), 'mean_train_loss': sum(losses) / len(losses) if losses else None,
               'base_model': json.loads(Path('/models/models.lock.json').read_text())['student'],
-              'dataset_sha256': fingerprint, 'human_gold_documents': 0}
+              'dataset_sha256': fingerprint, 'human_gold_documents': sum(human_counts.values()),
+              'human_gold_by_split': dict(human_counts)}
     report['dataset_scope'] = json.loads((ROOT / 'reports/dataset.json').read_text()).get('scope', 'whole_document')
     atomic_json(report_path, report)
     emit('training_complete', steps=step, weights_bytes=report['weights_bytes'], reload_verified=True)
@@ -180,7 +192,7 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         message = str(error)
-        code = message if message.startswith('E_') and len(message) < 40 else 'E_TRAINING'
+        code = message if message.startswith('E_') and len(message) < 50 else 'E_TRAINING'
         for marker, category in [('out of memory', 'E_GPU_MEMORY'), ('CUDA error', 'E_CUDA_RUNTIME'),
                                  ('same device', 'E_DEVICE'), ('dtype', 'E_DTYPE'),
                                  ('grad_fn', 'E_GRADIENT'), ('inplace', 'E_AUTOGRAD')]:

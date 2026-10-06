@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Build','Download','Tools','Audit','Ingest','Partition','Label','FastLabel','TaskExport','Export','Review','Baseline','TaskBaseline','Smoke','Train','Evaluate','TaskEvaluate','Select','Merge','Convert','GGUFCheck','Status')]
+    [ValidateSet('Build','Download','Tools','Audit','Ingest','Partition','Label','FastLabel','TaskExport','Export','Review','Baseline','TaskBaseline','Smoke','Train','Evaluate','TaskEvaluate','Select','Merge','Convert','GGUFCheck','QuarantineAudit','Quarantine','RestoreQuarantine','Status')]
     [string]$Stage = 'Status',
     [int]$Limit = 0,
     [ValidateRange(1,30)][int]$Epochs = 2,
@@ -67,6 +67,19 @@ if ($Stage -in @('Download','Tools')) {
     if ($Stage -in @('Ingest','Review')) {
         $dockerArgs += @('--mount',"type=bind,source=$project\files,target=/input,readonly")
     }
+    if ($Stage -in @('QuarantineAudit','Quarantine','RestoreQuarantine')) {
+        $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $project 'files'))
+        $targetRoot = [System.IO.Path]::GetFullPath((Join-Path $privatePath 'quarantine'))
+        $workspaceRoot = [System.IO.Path]::GetFullPath($project) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $sourceRoot.StartsWith($workspaceRoot) -or -not $targetRoot.StartsWith($workspaceRoot)) {
+            throw 'E_PATH_OUTSIDE_WORKSPACE'
+        }
+        $access = if ($Stage -eq 'QuarantineAudit') { ',readonly' } else { '' }
+        $dockerArgs += @('--mount',"type=bind,source=$sourceRoot,target=/input$access")
+        if ($Stage -ne 'QuarantineAudit') {
+            $dockerArgs += @('--mount','type=volume,source=readdocument_proposal_data,target=/data')
+        }
+    }
     if ($Stage -in @('Label','Baseline','TaskBaseline','Smoke','Train','Evaluate','TaskEvaluate','Merge')) {
         $dockerArgs += @('--gpus','all')
     }
@@ -77,6 +90,9 @@ if ($Stage -in @('Download','Tools')) {
     }
     $dockerArgs += @($image,'python','-m')
     switch ($Stage) {
+        'QuarantineAudit' { $dockerArgs += @('training.local.quarantine','audit') }
+        'Quarantine' { $dockerArgs += @('training.local.quarantine','apply') }
+        'RestoreQuarantine' { $dockerArgs += @('training.local.quarantine','restore') }
         'FastLabel' { $dockerArgs += 'training.local.fast_labels' }
         'TaskExport' { $dockerArgs += 'training.local.task_labels' }
         'TaskBaseline' { $dockerArgs += @('training.local.evaluate_tasks','--variant','baseline') }

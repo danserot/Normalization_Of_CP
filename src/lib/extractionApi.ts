@@ -44,7 +44,7 @@ export const parseWithExtractionApi = async (
     method: "POST",
     body,
     credentials: "include",
-    signal: AbortSignal.timeout(620_000),
+    signal: AbortSignal.timeout(750_000),
   });
   if (!response.ok) {
     notifyUnauthorized(response.status);

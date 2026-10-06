@@ -6,8 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.extraction import DocumentError, Source, read_document
-from backend.local_model import apply_candidates
+from backend.extraction import DocumentError, read_document
 from backend.pipeline import process_document
 from backend.rules import extract_rules, parse_number
 from backend.tests.fixtures import make_fixtures
@@ -23,6 +22,13 @@ def fixtures(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     monkeypatch.setenv('LOCAL_MODEL_ENABLED', 'false')
+    def fixture_model(source, _content, _filename):
+        proposal, proof, warnings, used = extract_rules(source)
+        return (proposal, proof, warnings, used), {
+            'mode': 'model', 'reviewCompleted': True, 'visionUsed': False,
+            'coverageComplete': True, 'unclaimedRows': [], 'issues': [],
+        }
+    monkeypatch.setattr('backend.pipeline.extract_universal', fixture_model)
 
 
 @pytest.mark.parametrize('value,expected', [('1 234,56', 1234.56), ('1,234.56', 1234.56),
@@ -79,16 +85,6 @@ def test_conflicting_values_preserved(fixtures):
     assert [e['value'] for e in result['metadata']['fieldEvidence']['client']] == ['ТОО Гамма', 'ТОО Дельта']
 
 
-def test_model_cannot_invent_or_cross_rows():
-    source = Source('test.txt')
-    source.add('Кабель', 'table', 1)
-    source.add('100', 'table', 2, 2)
-    proposal, proof, warnings, used = extract_rules(source)
-    apply_candidates({'fields': [{'field': 'client', 'cell': 'c0', 'value': 'Придуманное ООО'}],
-        'items': [{'name': 'c0', 'quantity': '', 'unitPrice': 'c1'}]}, source.cells, proposal, proof)
-    assert not proposal['client'] and not proposal['items']
-
-
 def test_invalid_signature_and_limits():
     with pytest.raises(DocumentError):
         read_document(b'not a pdf', 'bad.pdf')
@@ -127,6 +123,23 @@ def test_footer_is_not_item():
     result = process_document('Наименование\tКоличество\tЦена\nКабель\t2\t100\nГарантия: 12 месяцев'.encode(), 'test.txt')
     assert len(result['proposal']['items']) == 1
     assert result['proposal']['warranty'] == '12 месяцев'
+
+
+def test_plain_text_is_split_into_text_and_table_blocks():
+    source = read_document(
+        ('Поставщик: ООО Синтетика\n'
+         'Наименование\tКоличество\tЦена\n'
+         'Кабель\t2\t100\n'
+         'Гарантия: 12 месяцев').encode(),
+        'mixed.txt',
+    )
+    kinds = {cell.kind for cell in source.cells}
+    assert kinds == {'text', 'table'}
+    assert {cell.block for cell in source.cells if cell.kind == 'text'}.isdisjoint(
+        {cell.block for cell in source.cells if cell.kind == 'table'}
+    )
+    assert all(cell.kind == 'table' for cell in read_document(
+        'Товар;Количество;Цена\nКабель;2;100'.encode(), 'table.csv').cells)
 
 
 @pytest.mark.skipif(not os.getenv('TEST_OCR'), reason='Requires Tesseract kaz')

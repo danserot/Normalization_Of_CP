@@ -48,6 +48,18 @@ export type FieldEvidence = {
   warning?: string;
   value?: string | number;
 };
+export type SourceCell = {
+  id: string;
+  file: string;
+  text: string;
+  block: string;
+  row: number;
+  cell: number;
+  page?: number | null;
+  sheet?: string | null;
+  kind?: "text" | "table";
+  method?: string;
+};
 export type ModelRun = {
   model: string;
   name: string;
@@ -63,9 +75,19 @@ export type ExtractionMetadata = {
   status: ParserStatus;
   confidence: number;
   warnings: string[];
+  outcome?: {
+    state: "complete" | "partial" | "unavailable";
+    message: string;
+    unavailable: { field: string; label: string }[];
+    ocrReviewPages?: number[];
+  };
   fieldEvidence?: Record<string, FieldEvidence | FieldEvidence[]>;
+  sourceCells?: SourceCell[];
   ocrPages?: number;
   ocrPageNumbers?: number[];
+  ocrQuality?: { page: number; meanConfidence: number | null; words: number }[];
+  cacheHit?: boolean;
+  timingsMs?: { read: number; model: number; validation: number; total: number };
   modelRuns?: ModelRun[];
   verification?: {
     mode: string;
@@ -73,6 +95,7 @@ export type ExtractionMetadata = {
     visionUsed: boolean;
     coverageComplete: boolean;
     unclaimedRows: { block: string; row: number }[];
+    targetedReviewRows?: number;
     issues: string[];
   };
 };

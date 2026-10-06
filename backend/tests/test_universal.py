@@ -89,6 +89,17 @@ def test_vision_routes_problem_pages_and_keeps_grounding(monkeypatch):
     assert request.call_args.kwargs['images']
 
 
+def test_model_unavailable_never_runs_rule_fallback():
+    source, _ = sample()
+    with patch('backend.universal.model_available', return_value=False), patch(
+            'backend.rules.extract_rules') as rules:
+        result, report = extract_universal(source, b'', 'unknown.pdf')
+    assert result is None
+    assert report['mode'] == 'model_error'
+    assert 'данные не извлечены' in report['issues'][0]
+    rules.assert_not_called()
+
+
 @pytest.mark.parametrize('text,value', [('14,204', 14.204), ('48 600,0000', 48600),
     ('1 68 117 934,30', 168117934.30), ('1,234.56', 1234.56), ('SKU-12', None), ('NaN', None)])
 def test_contextual_estimate_numbers(text, value):

@@ -102,6 +102,24 @@ def test_export_only_reviewed_documents_with_groups_and_production_schemas(clien
         assert 'kp_test' in json.loads(archive.read('dataset_info.json'))
 
 
+def test_quarantined_upload_stays_excluded_even_after_human_review(client):
+    import hashlib
+    content = 'Поставщик: ООО Синтетика'.encode()
+    with main.connect_db() as db:
+        db.execute('INSERT INTO training_exclusions VALUES (?,?)',
+                   (hashlib.sha256(content).hexdigest(), json.dumps(['E_PRICE_UNAVAILABLE'])))
+    document = upload(client, 'quarantined.txt', content)
+    assert document['automation']['quarantined']
+    reviewed = client.post('/api/annotations/' + document['id'], json=mark_reviewed(document))
+    assert reviewed.status_code == 200
+    assert client.get('/api/annotations/export').status_code == 422
+    good = upload(client, 'usable.txt', 'Поставщик: ООО Другая синтетика'.encode())
+    assert client.post('/api/annotations/' + good['id'], json=mark_reviewed(good)).status_code == 200
+    with ZipFile(BytesIO(client.get('/api/annotations/export').content)) as archive:
+        exported = json.loads(archive.read('manifest.json'))['documents']
+        assert [entry['id'] for entry in exported] == [good['id']]
+
+
 @pytest.mark.parametrize('filename,kind', [
     ('offer.pdf', 'pdf'), ('offer-scan.pdf', 'pdf'), ('offer.docx', 'word'),
     ('offer.xlsx', 'table'), ('offer.xls', 'table'), ('offer.csv', 'table'), ('offer.tsv', 'table'),

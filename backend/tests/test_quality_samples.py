@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from backend.pipeline import process_document
+from backend.rules import extract_rules
 
 
 SAMPLES = Path(__file__).resolve().parents[2] / 'examples' / 'mock_kp'
@@ -20,6 +21,13 @@ def test_mock_offer_fields_items_and_evidence(filename, monkeypatch):
     if filename in (*[f'offer.{ext}' for ext in OCR_FORMATS], 'offer-scan.pdf') and not os.getenv('TEST_OCR'):
         pytest.skip('Run with TEST_OCR=1 and Tesseract rus+eng')
     monkeypatch.setenv('LOCAL_MODEL_ENABLED', 'false')
+    def fixture_model(source, _content, _filename):
+        proposal, proof, warnings, used = extract_rules(source)
+        return (proposal, proof, warnings, used), {
+            'mode': 'model', 'reviewCompleted': True, 'visionUsed': False,
+            'coverageComplete': True, 'unclaimedRows': [], 'issues': [],
+        }
+    monkeypatch.setattr('backend.pipeline.extract_universal', fixture_model)
     expected = json.loads((SAMPLES / 'expected.json').read_text(encoding='utf-8'))
     result = process_document((SAMPLES / filename).read_bytes(), filename)
     proposal, evidence = result['proposal'], result['metadata']['fieldEvidence']

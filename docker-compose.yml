@@ -19,6 +19,8 @@ services:
       LOCAL_MODEL_ENABLED: ${LOCAL_MODEL_ENABLED:-true}
       LOCAL_VISION_ENABLED: ${LOCAL_VISION_ENABLED:-false}
       EXTRACTION_TIMEOUT_SECONDS: ${EXTRACTION_TIMEOUT_SECONDS:-480}
+      EXTRACTION_QUEUE_LIMIT: ${EXTRACTION_QUEUE_LIMIT:-2}
+      EXTRACTION_QUEUE_WAIT_SECONDS: ${EXTRACTION_QUEUE_WAIT_SECONDS:-120}
       TESSERACT_LANG: ${TESSERACT_LANG:-rus+eng}
       OMP_THREAD_LIMIT: "2"
       DATABASE_PATH: /data/readdocument.sqlite3
@@ -36,11 +38,11 @@ services:
   model:
     profiles: [model]
     image: ghcr.io/ggml-org/llama.cpp@sha256:f9115c95639e60abc09d4ea83b26fd4d56c66aa1174594393335a514da00c283
-    network_mode: service:backend
     depends_on: [backend]
+    networks: [offline]
     volumes:
       - ./models:/models:ro
-    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "127.0.0.1", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128", "--log-disable", "--no-webui"]
+    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "0.0.0.0", "--port", "8081", "-c", "8192", "-np", "1", "-t", "4", "-ngl", "0", "-b", "128", "-ub", "128", "--log-disable", "--no-webui"]
     mem_limit: 1900m
     memswap_limit: 1900m
     cpus: 4

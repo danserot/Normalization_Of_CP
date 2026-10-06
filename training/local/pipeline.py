@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .privacy import atomic_json, emit, require_isolation, silent_libraries
+from .exclusions import excluded_ids
 
 ROOT = Path('/private')
 
@@ -59,6 +60,7 @@ def parse_one(identifier):
 
 
 def ingest():
+    excluded = excluded_ids()
     for folder in ('records', 'parsed', 'labels', 'reports', 'datasets'):
         (ROOT / folder).mkdir(parents=True, exist_ok=True)
     paths = [p for p in Path('/input').rglob('*') if p.is_file()]
@@ -67,6 +69,9 @@ def ingest():
     completed, failures, skipped = 0, 0, 0
     for path in paths:
         identifier = hashlib.sha256(path.read_bytes()).hexdigest()
+        if identifier in excluded:
+            skipped += 1
+            continue
         destination = ROOT / 'records' / (identifier + '.json')
         old = load(destination, {})
         if old.get('parse_status') == 'parsed':
@@ -132,6 +137,8 @@ def label(args):
     from .inference import LocalGenerator, annotate
     from .quality import check_annotation
     assignment = load(ROOT / 'partition.json')['documents']
+    excluded = excluded_ids()
+    assignment = {k: v for k, v in assignment.items() if k not in excluded}
     teacher = load('/models/models.lock.json')['teacher']
     code_hash = hashlib.sha256(Path(__file__).with_name('inference.py').read_bytes()).hexdigest()
     atomic_json(ROOT / 'reports' / 'label_configuration.json', {'teacher': teacher, 'inference_code_sha256': code_hash,
@@ -192,6 +199,8 @@ def label(args):
 def export(args):
     from backend.annotation_data import Annotation, training_examples, validate_annotation
     assignment = load(ROOT / 'partition.json')['documents']
+    excluded = excluded_ids()
+    assignment = {k: v for k, v in assignment.items() if k not in excluded}
     datasets = {'train': [], 'val': [], 'test': []}
     manifest = []
     human = {}
@@ -233,6 +242,8 @@ def import_review(args):
         if path.stem not in assignment and load(path).get('parse_status') == 'parse_error':
             assignment[path.stem] = {'group': path.stem, 'split': 'review_only'}
     # Round-robin format/split/reason buckets creates a small diverse queue.
+    excluded = excluded_ids()
+    assignment = {k: v for k, v in assignment.items() if k not in excluded}
     buckets = collections.defaultdict(list)
     for identifier, group in assignment.items():
         record = load(ROOT / 'records' / (identifier + '.json'))

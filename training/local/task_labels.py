@@ -10,6 +10,7 @@ from .fast_labels import rule_annotation
 from .pipeline import ROOT, load
 from .privacy import atomic_json, emit, require_isolation, silent_libraries
 from .quality import check_annotation
+from .exclusions import excluded_ids
 
 
 def certified_layouts(payload, group):
@@ -45,7 +46,10 @@ def main():
     require_isolation()
     datasets = {'train': [], 'val': [], 'test': []}
     manifest, documents = [], collections.Counter()
+    excluded = excluded_ids()
     for identifier, group in load(ROOT / 'partition.json')['documents'].items():
+        if identifier in excluded:
+            continue
         payload = load(ROOT / 'parsed' / (identifier + '.json'))
         with silent_libraries():
             examples = certified_layouts(payload, group['group'])

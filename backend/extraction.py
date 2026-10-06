@@ -41,8 +41,10 @@ class Cell:
     cell: int
     page: int | None = None
     sheet: str | None = None
+    kind: str = 'text'
     method: str = 'text'
     bbox: list[float] | None = None
+    ocr_confidence: float | None = None
 
 
 @dataclass
@@ -51,6 +53,7 @@ class Source:
     cells: list[Cell] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     ocr_pages: list[int] = field(default_factory=list)
+    ocr_quality: list[dict] = field(default_factory=list)
     started: float = field(default_factory=time.monotonic)
     chars: int = 0
 
@@ -94,11 +97,27 @@ def check_zip(content):
             raise DocumentError('Слишком большой распакованный документ (лимит 80 МБ)')
 
 
-def add_lines(source, text, block, **location):
+def add_lines(source, text, block, kind='text', split_blocks=False, **location):
+    current_kind = None
+    block_index = 0
     for row, line in enumerate(text.splitlines(), 1):
         # Do not split ordinary single spaces in names or localized numbers.
-        for col, value in enumerate(re.split(r'\t|\s{2,}|\|', line), 1):
-            source.add(value, block, row, col, **location)
+        values = re.split(r'\t|\s{2,}|\|', line)
+        row_kind = 'table' if split_blocks and len(values) > 1 else kind
+        if split_blocks and row_kind != current_kind:
+            block_index += 1
+            current_kind = row_kind
+        row_block = f'{block}-{row_kind}-{block_index}' if split_blocks else block
+        for col, value in enumerate(values, 1):
+            source.add(value, row_block, row, col, kind=row_kind, **location)
+
+
+def ocr_confidence(value):
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if score >= 0 else None
 
 
 def ocr(source, original, page):
@@ -125,18 +144,41 @@ def ocr(source, original, page):
         pass
     # Automatic layout for full pages; uniform-block mode for small crops.
     psm = 3 if image.height > image.width * 0.7 else 6
+    def mean_confidence(result):
+        scores = [score for i, word in enumerate(result['text']) if word.strip()
+                  and (score := ocr_confidence(result['conf'][i])) is not None]
+        return (sum(scores) / len(scores), len(scores)) if scores else (None, 0)
+
     data = pytesseract.image_to_data(image, lang=lang, config=f'--oem 1 --psm {psm}',
                                      output_type=pytesseract.Output.DICT, timeout=35)
+    first_score, _ = mean_confidence(data)
+    retry_used = False
+    if first_score is not None and first_score < 55:
+        # A bounded binarized retry helps faded scans while leaving already-clear pages untouched.
+        threshold = image.point(lambda pixel: 255 if pixel >= 165 else 0)
+        try:
+            retry = pytesseract.image_to_data(threshold, lang=lang, config=f'--oem 1 --psm {psm}',
+                                              output_type=pytesseract.Output.DICT, timeout=12)
+            retry_score, _ = mean_confidence(retry)
+            if retry_score is not None and retry_score > first_score + 3:
+                data = retry
+                retry_used = True
+        except (pytesseract.TesseractError, RuntimeError):
+            pass
+        finally:
+            threshold.close()
     # Tesseract may return each table column as a separate block. Reassemble
     # physical rows by their baseline before assigning cell numbers.
-    indices = [i for i, text in enumerate(data['text']) if text.strip()]
+    word_indices = [i for i, text in enumerate(data['text']) if text.strip()]
     groups = []
-    for i in sorted(indices, key=lambda n: data['top'][n] + data['height'][n] / 2):
+    for i in sorted(word_indices, key=lambda n: data['top'][n] + data['height'][n] / 2):
         center = data['top'][i] + data['height'][i] / 2
         if not groups or abs(groups[-1][0] - center) > max(8, data['height'][i] * .6):
             groups.append((center, []))
         groups[-1][1].append(i)
     numeric_columns = {}
+    table_index = 0
+    text_index = 1
 
     def reread(indices, language, config):
         x = min(data['left'][i] for i in indices)
@@ -173,14 +215,22 @@ def ocr(source, original, page):
             row_cells.append([col, chunk, ' '.join(data['text'][i] for i in chunk), [x, y, right, bottom]])
 
         labels = {col: re.sub(r'[^\w]+', ' ', value.casefold()).strip() for col, _, value, _ in row_cells}
-        if any(label in ('наименование', 'name', 'description') for label in labels.values()):
+        header_detected = any(label in ('наименование', 'name', 'description') for label in labels.values())
+        was_table = bool(numeric_columns)
+        is_total = bool(row_cells and re.match(r'^(итого|всего|к оплате)(?:\s|:|$)', row_cells[0][2], re.I))
+        if header_detected:
+            table_index += 1
             numeric_columns = {col: role for col, label in labels.items() for role, names in {
                 'quantity': ('количество', 'кол во', 'кол', 'qty', 'quantity'),
                 'unitPrice': ('цена', 'цена за ед', 'price', 'unitprice'),
                 'lineTotal': ('сумма', 'стоимость', 'итого', 'total'),
             }.items() if label in names}
-        elif row_cells and re.match(r'^(итого|всего|к оплате)(?:\s|:|$)', row_cells[0][2], re.I):
+        elif is_total:
             numeric_columns = {}
+
+        row_kind = 'table' if header_detected or was_table else 'text'
+        row_block = (f'page-{page}-ocr-table-{max(1, table_index)}' if row_kind == 'table'
+                     else f'page-{page}-ocr-text-{text_index}')
 
         values = {numeric_columns[col]: parse_number(value) for col, _, value, _ in row_cells if col in numeric_columns}
         for col, chunk, value, bbox in row_cells:
@@ -202,7 +252,19 @@ def ocr(source, original, page):
                     ) <= .02:
                         source.warnings.append(f'Страница {page}, строка {row}: OCR числа перепроверен по изображению и сумме строки ({value} → {candidate})')
                         value = candidate
-            source.add(value, f'page-{page}', row, col, page=page, method='ocr', bbox=bbox)
+            token_scores = [score for i in chunk
+                            if (score := ocr_confidence(data['conf'][i])) is not None]
+            source.add(value, row_block, row, col, page=page, kind=row_kind, method='ocr', bbox=bbox,
+                       ocr_confidence=round(sum(token_scores) / len(token_scores), 1) if token_scores else None)
+        if is_total:
+            text_index += 1
+    page_scores = [score for i in word_indices
+                   if (score := ocr_confidence(data['conf'][i])) is not None]
+    page_score = round(sum(page_scores) / len(page_scores), 1) if page_scores else None
+    source.ocr_quality.append({'page': page, 'meanConfidence': page_score, 'words': len(page_scores),
+                               'binarizedRetry': retry_used})
+    if page_score is None or page_score < 55:
+        source.warnings.append(f'Страница {page}: низкая уверенность OCR; сверьте распознанный текст с оригиналом')
     source.ocr_pages.append(page)
     source.warnings.append(f'Страница {page}: OCR, сверьте значения и таблицы с оригиналом')
     image.close()
@@ -238,7 +300,7 @@ def read_document(content: bytes, filename: str) -> Source:
                     for row, values in enumerate(table.extract(), 1):
                         for col, value in enumerate(values, 1):
                             source.add(value, f'page-{page_no}-table-{index}', row, col,
-                                       page=page_no, bbox=list(table.bbox))
+                                       page=page_no, kind='table', bbox=list(table.bbox))
                 # Group positioned words into rows (works for borderless aligned tables).
                 rows = []
                 for word in sorted(page.get_text('words'), key=lambda w: (round(w[1] / 3), w[0])):
@@ -255,7 +317,8 @@ def read_document(content: bytes, filename: str) -> Source:
                         chunks[-1].append(word)
                     for col, chunk in enumerate(chunks, 1):
                         source.add(' '.join(w[4] for w in chunk), f'page-{page_no}', row_no, col,
-                                   page=page_no, bbox=[chunk[0][0], chunk[0][1], chunk[-1][2], chunk[-1][3]])
+                                   page=page_no, kind='text',
+                                   bbox=[chunk[0][0], chunk[0][1], chunk[-1][2], chunk[-1][3]])
     elif suffix == '.docx':
         check_zip(content)
         doc = Document(BytesIO(content))
@@ -263,16 +326,16 @@ def read_document(content: bytes, filename: str) -> Source:
         from docx.text.paragraph import Paragraph
         for index, element in enumerate(doc.element.body):
             if element.tag.endswith('}p'):
-                add_lines(source, Paragraph(element, doc).text, f'paragraph-{index}')
+                add_lines(source, Paragraph(element, doc).text, f'paragraph-{index}', kind='text')
             elif element.tag.endswith('}tbl'):
                 for row_no, row in enumerate(Table(element, doc).rows, 1):
                     for col, cell in enumerate(row.cells, 1):
-                        source.add(cell.text, f'table-{index}', row_no, col)
+                        source.add(cell.text, f'table-{index}', row_no, col, kind='table')
         for index, section in enumerate(doc.sections):
             for kind in ('header', 'footer'):
                 part = getattr(section, kind)
                 for row_no, paragraph in enumerate(part.paragraphs, 1):
-                    source.add(paragraph.text, f'{kind}-{index}', row_no)
+                    source.add(paragraph.text, f'{kind}-{index}', row_no, kind='text')
     elif suffix in {'.xlsx', '.xls'}:
         if suffix == '.xlsx':
             import openpyxl
@@ -291,7 +354,8 @@ def read_document(content: bytes, filename: str) -> Source:
                         if row_no > 10000 or len(values) > 100:
                             raise DocumentError('Лист превышает 10 000 строк / 100 колонок')
                         for col, value in enumerate(values, 1):
-                            source.add(value, f'sheet-{sheet.title}', row_no, col, sheet=sheet.title)
+                            source.add(value, f'sheet-{sheet.title}', row_no, col,
+                                       sheet=sheet.title, kind='table')
                 source.warnings.append('Excel: формулы читаются из сохранённого результата; пустой кэш остаётся пустым')
             finally:
                 workbook.close()
@@ -308,7 +372,8 @@ def read_document(content: bytes, filename: str) -> Source:
                         for col in range(sheet.ncols):
                             cell = sheet.cell(row, col)
                             value = xlrd.xldate.xldate_as_datetime(cell.value, workbook.datemode).date().isoformat() if cell.ctype == 3 else cell.value
-                            source.add(value, f'sheet-{sheet.name}', row + 1, col + 1, sheet=sheet.name)
+                            source.add(value, f'sheet-{sheet.name}', row + 1, col + 1,
+                                       sheet=sheet.name, kind='table')
             finally:
                 workbook.release_resources()
     elif suffix in {'.png', '.jpg', '.jpeg', '.webp'}:
@@ -330,12 +395,13 @@ def read_document(content: bytes, filename: str) -> Source:
                 if isinstance(val, list) and all(isinstance(v, dict) for v in val):
                     keys = list(dict.fromkeys(k for item in val for k in item))
                     for col, k in enumerate(keys, 1):
-                        source.add(k, f'json-{key}', 1, col)
+                        source.add(k, f'json-{key}', 1, col, kind='table')
                     for index, item in enumerate(val, 2):
                         for col, k in enumerate(keys, 1):
-                            source.add(item.get(k), f'json-{key}', index, col)
+                            source.add(item.get(k), f'json-{key}', index, col, kind='table')
                 elif not isinstance(val, (dict, list)):
-                    source.add(f'{key}: {val if val is not None else ""}', 'json-fields', row)
+                    source.add(f'{key}: {val if val is not None else ""}',
+                               'json-fields', row, kind='text')
                 else:
                     source.warnings.append(f'JSON: неподдерживаемая вложенная структура {key}')
         elif suffix in {'.csv', '.tsv'}:
@@ -345,9 +411,9 @@ def read_document(content: bytes, filename: str) -> Source:
                 dialect = csv.excel_tab if suffix == '.tsv' else csv.excel
             for row, values in enumerate(csv.reader(StringIO(text), dialect), 1):
                 for col, value in enumerate(values, 1):
-                    source.add(value, 'text-table', row, col)
+                    source.add(value, 'text-table', row, col, kind='table')
         else:
-            add_lines(source, text, 'text')
+            add_lines(source, text, 'text', split_blocks=True)
     if not source.text().strip():
         raise DocumentError('В документе не найден пригодный текст')
     return source

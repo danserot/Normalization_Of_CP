@@ -134,7 +134,7 @@ def test_task_metrics_penalize_missing_rows_and_wrong_references():
     assert result['grounded_references'] == result['exact_references'] == 0
 
 
-def test_empty_model_result_falls_back_to_explicit_source_table():
+def test_empty_model_result_stays_empty_without_rule_fallback():
     from backend.annotation_data import source_from_payload
     from backend.universal import Plan, extract_universal
     payload, _ = example()
@@ -144,7 +144,7 @@ def test_empty_model_result_falls_back_to_explicit_source_table():
          patch('backend.universal.infer_plan', return_value=empty), \
          patch('backend.universal.request_plan', return_value=empty):
         result, report = extract_universal(source, b'', 'synthetic.txt')
-    assert result is None
-    assert report['mode'] == 'fallback'
+    assert result is not None
+    assert result[0]['items'] == []
+    assert report['mode'] == 'model'
     assert not report['coverageComplete']
-    assert any('пропустила товарные строки' in issue for issue in report['issues'])

@@ -486,6 +486,63 @@
   white-space: pre-wrap;
   line-height: 1.5;
 }
+.annotation-source-text {
+  display: grid;
+  gap: 8px;
+  max-height: 620px;
+  overflow: auto;
+  padding: 10px;
+  background: #f7f9fc;
+}
+.annotation-source-text-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid #e1e8ef;
+  border-radius: 7px;
+  background: white;
+}
+.annotation-source-text-row > small {
+  color: #8091a3;
+  padding-top: 8px;
+}
+.annotation-source-text-row > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.annotation-source-text-row span,
+.annotation-source-text-row button {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.annotation-source-text-row span {
+  padding: 7px 4px;
+}
+.annotation-source-text-row button {
+  border: 0;
+  border-radius: 5px;
+  padding: 7px 9px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.annotation-source-text-row button:hover {
+  background: #edf8fb;
+}
+.annotation-source-text-row button.selected {
+  background: #daf3ed;
+  box-shadow: inset 0 0 0 2px #59aa96;
+}
+.annotation-source-text-row button small {
+  display: block;
+  color: #8a9cae;
+  font-size: 10px;
+}
 .annotation-label {
   display: grid;
   gap: 6px;

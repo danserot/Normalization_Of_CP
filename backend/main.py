@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .extraction import FORMATS, MAX_BYTES, DocumentError
 from .local_model import MODEL_NAME, model_available
-from .pipeline import Pipeline
+from .pipeline import Pipeline, QueueFullError
 from .annotations import create_annotation_router, initialize_annotations
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "./backend/data/readdocument.sqlite3"))
@@ -152,14 +152,16 @@ app.include_router(create_annotation_router(connect_db, require_auth, pipeline))
 async def health() -> dict:
     available = await asyncio.to_thread(model_available)
     return {"status": "ok", "database": "sqlite", "provider": "local", "model": MODEL_NAME,
-            "configured": available, "busy": pipeline.busy}
+            "configured": available, "device": os.getenv('LOCAL_MODEL_DEVICE', 'cpu'),
+            "busy": pipeline.busy, "queued": max(0, pipeline.pending - int(pipeline.busy)),
+            "queueLimit": pipeline.max_pending}
 
 
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
     return {"models": [{"id": "local", "name": "Локальное извлечение",
         "description": "Модель определяет структуру КП, проверяет источник и полноту; при недоступности — резервный разбор",
-        "size": "CPU · без внешних API", "recommended": True,
+        "size": f"{os.getenv('LOCAL_MODEL_DEVICE', 'cpu').upper()} · без внешних API", "recommended": True,
         "installed": await asyncio.to_thread(model_available)}]}
 
 
@@ -205,18 +207,16 @@ async def extract(file: UploadFile = File(...), models: str = Form(default=""), 
                 raise ValueError()
         except (ValueError, TypeError):
             raise HTTPException(status_code=422, detail="Доступен только локальный конвейер")
-    if pipeline.busy:
-        raise HTTPException(status_code=429, detail="Уже обрабатывается документ. Повторите после завершения", headers={"Retry-After": "5"})
-    pipeline.busy = True
     try:
         content = await file.read(MAX_BYTES + 1)
         if len(content) > MAX_BYTES:
             raise HTTPException(status_code=413, detail="Файл должен быть не больше 25 МБ")
         return await pipeline.run(content, filename)
+    except QueueFullError as error:
+        raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "5"}) from error
     except DocumentError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:
-        pipeline.busy = False
         await file.close()
 
 

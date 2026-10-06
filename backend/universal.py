@@ -109,8 +109,11 @@ def requisite_batches(cells):
 
 def metadata_cells(source, tables):
     """Keep requisites above/below a table on the same spreadsheet/PDF block."""
+    ranges = {}
+    for table in tables:
+        ranges.setdefault(table.block, []).append((table.firstRow, table.lastRow))
     return [c for c in source.cells if not any(
-        c.block == t.block and t.firstRow <= c.row <= t.lastRow for t in tables)]
+        first <= c.row <= last for first, last in ranges.get(c.block, ()))]
 
 
 def inference_schema(contract, payload):
@@ -180,10 +183,12 @@ def catalog(source):
     return result
 
 
-def review_batches(source, limit=6500):
-    """Visit every original row, never silently truncate the verification input."""
+def review_batches(source, selected_rows=None, limit=6500):
+    """Review only rows flagged by extraction or OCR confidence checks."""
     batch, size = [], 0
     for (block, row), cells in grouped_rows(source).items():
+        if selected_rows is not None and (block, row) not in selected_rows:
+            continue
         entry = {'block': block, 'row': row, 'cells': [[c.id, c.cell, c.text] for c in cells if c.text]}
         length = len(json.dumps(entry, ensure_ascii=False))
         if batch and size + length > limit:
@@ -231,8 +236,11 @@ def infer_plan(source, data):
     """Small semantic tasks work better than a document-wide generation on CPU."""
     tables, fields, previous = [], [], None
     rows = grouped_rows(source)
+    rows_by_block = {}
+    for (block, _), cells in rows.items():
+        rows_by_block.setdefault(block, []).append(cells)
     for block in data:
-        entries = [cells for (key, _), cells in rows.items() if key == block['block']]
+        entries = rows_by_block.get(block['block'], [])
         width = max(c.cell for cells in entries for c in cells)
         if width < 2:
             continue
@@ -279,6 +287,9 @@ def apply_plan(source, plan):
     proof, warnings, covered = {}, list(source.warnings), set()
     by_id = {c.id: c for c in source.cells}
     rows = grouped_rows(source)
+    rows_by_block = {}
+    for row_key, cells in rows.items():
+        rows_by_block.setdefault(row_key[0], []).append((row_key, cells))
     def record(key, value, cell):
         proof[key] = evidence(cell, value, 'model')
     for candidate in plan.fields:
@@ -308,8 +319,8 @@ def apply_plan(source, plan):
         cell = by_id.get(component.labelCell)
         return cell and component.label.strip() and component.label in cell.text
     for table in plan.tables:
-        matching = [(key, cells) for key, cells in rows.items()
-                    if key[0] == table.block and table.firstRow <= key[1] <= table.lastRow]
+        matching = [(key, cells) for key, cells in rows_by_block.get(table.block, ())
+                    if table.firstRow <= key[1] <= table.lastRow]
         if not matching:
             warnings.append(f'Модель указала отсутствующую таблицу {table.block}')
             continue
@@ -399,13 +410,21 @@ def extract_universal(source, content, filename):
     report = {'mode': 'model', 'reviewCompleted': False, 'visionUsed': False,
               'coverageComplete': False, 'unclaimedRows': [], 'issues': []}
     if not model_available():
-        return None, {**report, 'mode': 'fallback', 'issues': ['Локальная модель недоступна или выключена; универсальное извлечение не выполнено']}
+        return None, {**report, 'mode': 'model_error',
+                      'issues': ['Локальная модель недоступна или выключена; данные не извлечены']}
     data = catalog(source)
     try:
         plan = infer_plan(source, data)
         first = apply_plan(source, plan)
-        batches = list(review_batches(source))
+        review_rows = set(first[4])
+        review_rows.update((cell.block, cell.row) for cell in source.cells
+                           if cell.method == 'ocr' and
+                           (cell.ocr_confidence is None or cell.ocr_confidence < 60))
+        batches = list(review_batches(source, review_rows)) if review_rows else []
         report['reviewBatchesTotal'], report['reviewBatchesCompleted'] = len(batches), 0
+        report['targetedReviewRows'] = len(review_rows)
+        if not batches:
+            report['reviewCompleted'] = True
         for batch in batches:
             try:
                 # Give the original rows plus global header context. Corrections
@@ -448,18 +467,13 @@ def extract_universal(source, content, filename):
             else:
                 report['issues'].append('Есть сложные фрагменты; зрительная модель не подключена, проверьте оригинал')
         report['unclaimedRows'] = [{'block': block, 'row': row} for block, row in result[4]]
-        report['coverageComplete'] = report['reviewCompleted'] and not result[4] and bool(result[0]['items'])
+        low_ocr = any(page['meanConfidence'] is None or page['meanConfidence'] < 55
+                      for page in source.ocr_quality)
+        report['coverageComplete'] = report['reviewCompleted'] and not result[4] and bool(result[0]['items']) and not low_ocr
         report['tables'] = len(plan.tables)
         report['items'] = len(result[0]['items'])
-        if not result[0]['items']:
-            from .rules import extract_rules
-            fallback = extract_rules(source)
-            if fallback[0]['items']:
-                report['mode'] = 'fallback'
-                report['issues'].append('Модель пропустила товарные строки; показан резервный разбор по явным заголовкам. Проверьте результат.')
-                return None, report
         return result[:4], report
     except (httpx.HTTPError, ValueError, KeyError, IndexError, DocumentError) as error:
-        report['mode'] = 'fallback'
-        report['issues'].append(f'Универсальное извлечение не завершено ({type(error).__name__}); показан резервный разбор')
+        report['mode'] = 'model_error'
+        report['issues'].append(f'Локальная модель не завершила извлечение ({type(error).__name__}); данные не извлечены')
         return None, report

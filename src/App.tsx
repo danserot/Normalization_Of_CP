@@ -22,7 +22,7 @@ type Upload = {
   metadata: ExtractionMetadata;
   error?: string;
 };
-function ConfidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
+function EvidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
   const entries = Object.values(metadata.fieldEvidence ?? {});
   const scored = entries.filter(
     (entry): entry is FieldEvidence =>
@@ -31,69 +31,37 @@ function ConfidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
   const conflicts = entries.filter(Array.isArray).length;
   return (
     <details className="confidence-explanation">
-      <summary>
-        Как рассчитывается {Math.round(metadata.confidence * 100)}%?
-      </summary>
+      <summary>Как читать подтверждения источника?</summary>
       <p>
-        Это условная оценка надёжности способа извлечения, а не измеренная
-        точность распознавания и не доля правильно заполненных полей.
+        Ссылка показывает, из какой ячейки или фрагмента взято значение. Это
+        помогает найти его в документе, но само совпадение текста не гарантирует,
+        что поле выбрано по смыслу правильно.
       </p>
       <ul>
         <li>
-          95% — значение извлечено правилами из текста документа или ячейки
-          таблицы.
+          Значений с привязанным источником: {scored.length}.
         </li>
         <li>
-          65% — значение получено из OCR (распознавания скана) или с помощью
-          локальной модели.
-        </li>
-        <li>
-          Общий процент = минимальная оценка среди учитываемых значений полей и
-          позиций. Если таких значений нет — 0%.
+          Конфликтующих значений: {conflicts}.
         </li>
       </ul>
       <p>
-        В расчёте этого файла: {scored.length} значений, из них с оценкой 95% —{" "}
-        {scored.filter(({ confidence }) => confidence === 0.95).length}, с
-        оценкой 65% —{" "}
-        {scored.filter(({ confidence }) => confidence === 0.65).length}.
-      </p>
-      <p>
-        Пропущенные поля и предупреждения не уменьшают процент. Поля с
-        несколькими конфликтующими источниками сейчас исключаются из расчёта
-        {conflicts > 0 ? ` (в этом файле: ${conflicts})` : ""}. Поэтому даже при
-        95% нужно проверить конфликты, суммы и источники перед сохранением.
+        Перед сохранением проверьте смысл поля, OCR, конфликты и суммы по
+        оригиналу.
       </p>
     </details>
   );
 }
-const fallbackModels: ExtractionModel[] = [
+const builtInModels: ExtractionModel[] = [
   {
     id: "local",
     name: "Локальное извлечение",
     description: "Универсальное извлечение структуры КП и проверка источников",
-    size: "CPU · без внешних API",
+    size: "CPU по умолчанию; GPU-профиль при настройке",
     recommended: true,
   },
 ];
-const defaultComparisonModels = fallbackModels.map(({ id }) => id);
-async function mapWithLimit<T, R>(
-  items: T[],
-  limit: number,
-  action: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (cursor < items.length) {
-        const index = cursor++;
-        results[index] = await action(items[index]);
-      }
-    }),
-  );
-  return results;
-}
+const defaultComparisonModels = builtInModels.map(({ id }) => id);
 const blank: CommercialProposal = {
   title: "",
   client: "",
@@ -130,7 +98,7 @@ const textFields: Array<[keyof CommercialProposal, string]> = [
   ["warranty", "Гарантия"],
 ];
 const money = (value: number | null, currency: string) => {
-  if (value === null) return "Не найдено";
+  if (value === null) return "Не удалось извлечь";
 
   const known =
     (
@@ -212,6 +180,7 @@ function App() {
   const [proposal, setProposal] = useState<CommercialProposal>(blank);
   const [error, setError] = useState("");
   const [reading, setReading] = useState(false);
+  const [readProgress, setReadProgress] = useState({ done: 0, total: 0, current: "" });
   const [dragging, setDragging] = useState(false);
   const [editing, setEditing] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
@@ -226,7 +195,7 @@ function App() {
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
-  const [models, setModels] = useState<ExtractionModel[]>(fallbackModels);
+  const [models, setModels] = useState<ExtractionModel[]>(builtInModels);
   const [selectionMode, setSelectionMode] = useState<"single" | "compare">(
     "single",
   );
@@ -333,15 +302,15 @@ function App() {
     if (reading) return;
     setReading(true);
     setUploads([]);
+    setReadProgress({ done: 0, total: acceptable.length, current: acceptable[0]?.file.name ?? "" });
     setProposal({ ...blank, items: [] });
     setConfirmed(false);
     setSaved(null);
     submissionKey.current = crypto.randomUUID();
     try {
-      const results = await mapWithLimit(
-        acceptable,
-        1,
-        async ({ file, error: sizeError }): Promise<Upload> => {
+      const results: Upload[] = [];
+      for (const { file, error: sizeError } of acceptable) {
+        const upload = await (async (): Promise<Upload> => {
           if (sizeError)
             return {
               file,
@@ -384,18 +353,24 @@ function App() {
                 warnings: [
                   cause instanceof Error ?
                     cause.message
-                  : "Не удалось обработать файл",
+                  : "Не удалось извлечь данные",
                 ],
               },
               error:
                 cause instanceof Error ?
                   cause.message
-                : "Не удалось обработать файл",
+                : "Не удалось извлечь данные",
             };
           }
-        },
-      );
-      setUploads(results);
+        })();
+        results.push(upload);
+        setUploads([...results]);
+        setReadProgress({
+          done: results.length,
+          total: acceptable.length,
+          current: acceptable[results.length]?.file.name ?? "",
+        });
+      }
       const successful = results.filter((upload) => !upload.error);
       setProposal(mergeUploads(successful));
       setEditing(false);
@@ -404,7 +379,7 @@ function App() {
       setPreviewFile(null);
       if (successful.length === 0)
         setError(
-          "Не удалось распознать ни одного файла. Проверьте формат и доступность сервера распознавания.",
+          "Не удалось извлечь данные. Подробности указаны рядом с файлами.",
         );
     } finally {
       setReading(false);
@@ -778,7 +753,7 @@ function App() {
               PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл
             </small>
             <small className="privacy-note">
-              Все документы обрабатываются локально на CPU. Tesseract читает
+              Все документы обрабатываются локально. Tesseract читает
               сканы, локальная модель определяет поля и структуру таблиц. Документы и
               результаты не отправляются во внешние сервисы.
             </small>
@@ -793,9 +768,11 @@ function App() {
               : "Читаем документы"}
             </h2>
             <p>
-              Документы обрабатываются по одному. Для каждого найденного
-              значения сохраняется источник.
+              Готово {readProgress.done} из {readProgress.total}. Документы
+              обрабатываются по одному, и результат каждого сохраняется по мере
+              завершения.
             </p>
+            {readProgress.current && <small className="active-models">Сейчас: {readProgress.current}</small>}
             <small className="active-models">
               {models
                 .filter(({ id }) => selectedModels.includes(id))
@@ -840,18 +817,39 @@ function App() {
                     }>
                     {file.name}
                   </button>
-                  <span className={`status ${fileError ? "warning" : "done"}`}>
+                  <span className={`status ${fileError || (metadata.outcome && metadata.outcome.state !== "complete") ? "warning" : "done"}`}>
                     {fileError ?
                       fileError
-                    : `✓ ${metadata.parser} · ${Math.round(metadata.confidence * 100)}%${metadata.ocrPages ? ` · OCR страницы ${metadata.ocrPageNumbers?.join(", ")}` : ""}`
+                    : metadata.outcome && metadata.outcome.state !== "complete" ? metadata.outcome.message
+                    : `✓ ${metadata.parser}${metadata.ocrPages ? ` · OCR страницы ${metadata.ocrPageNumbers?.join(", ")}` : ""}${metadata.cacheHit ? " · из локального кэша" : ""}`
                     }
                   </span>
-                  {!fileError && <ConfidenceExplanation metadata={metadata} />}
+                  {!fileError && <EvidenceExplanation metadata={metadata} />}
+                  {!!metadata.ocrQuality?.length && (
+                    <p className="validation-note">
+                      Качество OCR по Tesseract (ориентир, не точность полей): {metadata.ocrQuality.map(({ page, meanConfidence }) =>
+                        `стр. ${page}: ${meanConfidence === null ? "не оценено" : `${Math.round(meanConfidence)}%`}`,
+                      ).join(" · ")}
+                    </p>
+                  )}
+                  {!!metadata.timingsMs && (
+                    <p className="validation-note">
+                      Время: чтение {Math.round(metadata.timingsMs.read / 1000)} с · модель {Math.round(metadata.timingsMs.model / 1000)} с · проверка {Math.round(metadata.timingsMs.validation / 1000)} с
+                    </p>
+                  )}
+                  {!!metadata.outcome?.unavailable.length && (
+                    <details className="validation-note">
+                      <summary>Не удалось извлечь ({metadata.outcome.unavailable.length})</summary>
+                      <ul>{metadata.outcome.unavailable.map((entry) => (
+                        <li key={entry.field}>{entry.label}</li>
+                      ))}</ul>
+                    </details>
+                  )}
                   {metadata.verification && (
                     <p className="validation-note">
-                      {metadata.verification.mode === "fallback" ?
-                        "Резервный разбор: универсальная модель не завершила обработку"
-                      : `Повторная проверка: ${metadata.verification.reviewCompleted ? "завершена" : "не завершена"} · визуальное чтение: ${metadata.verification.visionUsed ? "выполнено" : "не выполнялось"} · строк для проверки: ${metadata.verification.unclaimedRows.length}`
+                      {metadata.verification.mode === "model_error" ?
+                        "Локальная модель не смогла извлечь данные"
+                      : `Повторная проверка: ${metadata.verification.reviewCompleted ? "завершена или не требовалась" : "не завершена"} · спорных строк отправлено модели: ${metadata.verification.targetedReviewRows ?? metadata.verification.unclaimedRows.length} · визуальное чтение: ${metadata.verification.visionUsed ? "выполнено" : "не выполнялось"}`
                       }
                     </p>
                   )}
@@ -948,7 +946,7 @@ function App() {
                   <DataField
                     key={key}
                     label={label}
-                    value={String(proposal[key] || "Не найдено")}
+                    value={String(proposal[key] || "Не удалось извлечь")}
                     evidence={uploads.flatMap(({ metadata }) =>
                       asEvidence(metadata.fieldEvidence?.[key]),
                     )}
@@ -981,7 +979,7 @@ function App() {
                           )}
                         </span>
                         <span>
-                          {item.quantity ?? "Кол-во не найдено"} {item.unit}
+                          {item.quantity ?? "Количество: не удалось извлечь"} {item.unit}
                         </span>
                         <strong>
                           {money(itemSum(item), proposal.currency)}

@@ -551,7 +551,12 @@ export default function AnnotationWorkspace({
                   Сохраните черновик; проверенный экспорт заблокирован.
                 </div>
               )}
-              {doc.automation && doc.status !== "reviewed" && (
+              {doc.automation?.quarantined && (
+                <div className="validation-box" role="status">
+                  Карантин: документ исключён из обучения. Не удалось надёжно извлечь или проверить часть данных.
+                </div>
+              )}
+              {doc.automation && !doc.automation.quarantined && doc.status !== "reviewed" && (
                 <div className="annotation-hint" role="status">
                   {doc.automation.status === "auto_validated"
                     ? "Авторазметка прошла программные проверки. Проверка человеком ещё не выполнена."
@@ -1514,6 +1519,12 @@ function SourceBrowser({
   }, [blockCells, search]);
   const width = Math.max(1, ...blockCells.map((cell) => cell.cell));
   const location = blockCells[0];
+  const isTableBlock =
+    blockCells.some((cell) => cell.kind === "table") ||
+    (blockCells.every((cell) => !cell.kind) &&
+      /(^|-)table(?:-|$)|^sheet-|^text-table$|^json-(?!fields$)/.test(
+        currentBlock,
+      ));
   // Reset display offset without an effect when the block/filter changes.
   const pageOffset = Math.min(
     offset,
@@ -1539,9 +1550,20 @@ function SourceBrowser({
               onBlock(event.target.value);
               setOffset(0);
             }}>
-            {blocks.map((name) => (
-              <option key={name}>{name}</option>
-            ))}
+            {blocks.map((name) => {
+              const cellsInBlock = cells.filter((cell) => cell.block === name);
+              const table =
+                cellsInBlock.some((cell) => cell.kind === "table") ||
+                (cellsInBlock.every((cell) => !cell.kind) &&
+                  /(^|-)table(?:-|$)|^sheet-|^text-table$|^json-(?!fields$)/.test(
+                    name,
+                  ));
+              return (
+                <option key={name} value={name}>
+                  {table ? "Таблица" : "Текст"} · {name}
+                </option>
+              );
+            })}
           </select>
         </label>
         <input
@@ -1556,14 +1578,16 @@ function SourceBrowser({
       </div>
       <p className="annotation-hint">
         {location?.sheet ? `Лист: ${location.sheet} · ` : ""}
-        {location?.page ? `Страница: ${location.page} · ` : ""}Строк:{" "}
-        {rows.length} · колонок: {width}
+        {location?.page ? `Страница: ${location.page} · ` : ""}
+        {isTableBlock ? `Таблица · строк: ${rows.length} · колонок: ${width}` :
+          `Текстовый блок · строк: ${rows.length}`}
       </p>
       {!cells.length ?
         <p className="annotation-preview-caption">
           Нет извлечённых ячеек. Проверьте предупреждение чтения.
         </p>
-      : <div className="annotation-source-table-scroll">
+      : isTableBlock ?
+        <div className="annotation-source-table-scroll">
           <table className="annotation-source-table">
             <thead>
               <tr>
@@ -1615,6 +1639,32 @@ function SourceBrowser({
                 ))}
             </tbody>
           </table>
+        </div>
+      : <div className="annotation-source-text" role="list">
+          {rows.slice(pageOffset, pageOffset + 100).map(([row, entries]) => (
+            <div className="annotation-source-text-row" role="listitem" key={row}>
+              <small>Строка {row}</small>
+              <div>
+                {entries
+                  .sort((left, right) => left.cell - right.cell)
+                  .map((cell) =>
+                    readonly ?
+                      <span key={cell.id}>{cell.text}</span>
+                    : <button
+                        key={cell.id}
+                        disabled={disabled || !cell.text}
+                        className={cell.id === selected ? "selected" : ""}
+                        title={`${cell.id} · ${cell.method}`}
+                        onClick={() => onChoose(cell)}>
+                        <small>
+                          {cell.id}{cell.method === "ocr" ? " · OCR" : ""}
+                        </small>
+                        {cell.text || "—"}
+                      </button>,
+                  )}
+              </div>
+            </div>
+          ))}
         </div>
       }
       {rows.length > 100 && (
