@@ -1,6 +1,7 @@
 # Run from training/ after installing LLaMA-Factory in a separate Linux environment.
-# data/kp_train.json and data/kp_val.json must contain human-reviewed examples.
-model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+# data/kp_plan_train.json and data/kp_plan_val.json must contain human-reviewed plans.
+# This is an unexecuted starting configuration; verify CUDA/VRAM and sample lengths first.
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
 stage: sft
 do_train: true
 finetuning_type: lora
@@ -10,11 +11,11 @@ lora_alpha: 32
 lora_dropout: 0.05
 quantization_bit: 4
 quantization_method: bitsandbytes
-template: qwen
+template: qwen3_nothink
 dataset_dir: data
-dataset: kp_train
-eval_dataset: kp_val
-cutoff_len: 2048
+dataset: kp_plan_train
+eval_dataset: kp_plan_val
+cutoff_len: 8192
 packing: false
 train_on_prompt: false
 output_dir: output/qwen-kp-r16

@@ -9,6 +9,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
@@ -16,8 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from .extraction import FORMATS, MAX_BYTES, DocumentError
-from .local_model import MODEL_NAME, model_available
-from .pipeline import Pipeline, QueueFullError
+from .openai_model import model_available
+from .openai_client import configured_model
+from .vision import vision_health
+from .pipeline import PipelinePool, QueueFullError
 from .annotations import create_annotation_router, initialize_annotations
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "./backend/data/readdocument.sqlite3"))
@@ -26,7 +29,7 @@ APP_SECRET = os.getenv("APP_SECRET") or secrets.token_hex(32)
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SESSION_COOKIE = "readdocument_session"
 SESSION_LIFETIME = 8 * 60 * 60
-pipeline = Pipeline()
+pipeline = PipelinePool()
 
 
 class AdditionalField(BaseModel):
@@ -45,11 +48,12 @@ class CostComponent(BaseModel):
 class ProposalItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=500)
-    quantity: float = Field(gt=0, allow_inf_nan=False)
+    quantity: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     unit: str = Field(max_length=50)
-    unitPrice: float = Field(ge=0, allow_inf_nan=False)
+    unitPrice: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     lineTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     components: list[CostComponent] = Field(default_factory=list, max_length=10)
+    componentMode: Literal['additive', 'alternative'] | None = None
     additionalFields: list[AdditionalField] = Field(default_factory=list, max_length=30)
 
 
@@ -90,7 +94,7 @@ async def lifespan(app):
     pipeline.stop()
 
 
-app = FastAPI(title="ReadDocument local extraction API", lifespan=lifespan)
+app = FastAPI(title="ReadDocument OpenAI extraction API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -150,19 +154,22 @@ app.include_router(create_annotation_router(connect_db, require_auth, pipeline))
 
 @app.get("/api/health")
 async def health() -> dict:
-    available = await asyncio.to_thread(model_available)
-    return {"status": "ok", "database": "sqlite", "provider": "local", "model": MODEL_NAME,
-            "configured": available, "device": os.getenv('LOCAL_MODEL_DEVICE', 'cpu'),
-            "busy": pipeline.busy, "queued": max(0, pipeline.pending - int(pipeline.busy)),
-            "queueLimit": pipeline.max_pending}
+    available, vision = await asyncio.gather(asyncio.to_thread(model_available), asyncio.to_thread(vision_health))
+    return {"status": "ok", "database": "sqlite", "provider": "openai", "model": configured_model(),
+            "configured": available, "device": "api", "apiConnectionVerified": False,
+            "busy": pipeline.busy, "queued": max(0, pipeline.pending - pipeline.active),
+            "workers": len(pipeline.workers), "active": pipeline.active,
+            "queueLimit": pipeline.max_pending, "vision": vision,
+            "architecture": "openai-vision-source-grounded-v3"}
 
 
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
-    return {"models": [{"id": "local", "name": "Локальное извлечение",
-        "description": "Модель определяет структуру КП, проверяет источник и полноту; при недоступности — резервный разбор",
-        "size": f"{os.getenv('LOCAL_MODEL_DEVICE', 'cpu').upper()} · без внешних API", "recommended": True,
-        "installed": await asyncio.to_thread(model_available)}]}
+    configured = await asyncio.to_thread(model_available)
+    return {"models": [{"id": "openai", "name": "OpenAI · " + configured_model(),
+        "description": "OpenAI читает изображения и PDF и определяет поля КП. Значения проверяются по исходному тексту; отсутствующие сведения остаются пустыми.",
+        "size": "API · без локальных моделей", "recommended": True,
+        "configured": configured, "installed": configured}]}
 
 
 @app.get("/api/session")
@@ -203,14 +210,17 @@ async def extract(file: UploadFile = File(...), models: str = Form(default=""), 
         raise HTTPException(status_code=415, detail="Неподдерживаемый формат файла")
     if models:
         try:
-            if json.loads(models) != ["local"]:
+            if json.loads(models) != ["openai"]:
                 raise ValueError()
         except (ValueError, TypeError):
-            raise HTTPException(status_code=422, detail="Доступен только локальный конвейер")
+            raise HTTPException(status_code=422, detail="Доступен только OpenAI API")
+    if not model_available():
+        await file.close()
+        raise HTTPException(status_code=503, detail="OpenAI API не настроен. Задайте OPENAI_API_KEY в .env и перезапустите backend.")
     try:
         content = await file.read(MAX_BYTES + 1)
         if len(content) > MAX_BYTES:
-            raise HTTPException(status_code=413, detail="Файл должен быть не больше 25 МБ")
+            raise HTTPException(status_code=413, detail=f"Файл должен быть не больше {MAX_BYTES // 1024**2} МБ")
         return await pipeline.run(content, filename)
     except QueueFullError as error:
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "5"}) from error

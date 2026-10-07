@@ -53,51 +53,28 @@ def test_hallucinated_header_and_field_are_rejected():
     assert len(warnings) >= 2
 
 
-def test_review_uses_original_and_repaired_plan():
-    source, plan = sample()
-    incomplete = plan.model_copy(deep=True)
-    incomplete.tables.pop()
-    with patch('backend.universal.model_available', return_value=True), patch('backend.universal.infer_plan', return_value=incomplete), patch(
-            'backend.universal.request_plan', return_value=plan) as request:
-        result, report = extract_universal(source, b'', 'unknown.pdf')
-    assert report['reviewCompleted']
-    assert len(result[0]['items']) == 2
-    assert request.call_args.kwargs['review']
-    assert request.call_args.args[1]['source']
-    assert request.call_args.args[1]['unclaimedRows'] == [('p2', 1)]
+def test_wrong_typed_grounded_metadata_is_rejected():
+    source, _ = sample()
+    plan = Plan(fields=[
+        Quote(field='documentNumber', cell='c3', value='Оборудование'),
+        Quote(field='documentDate', cell='c7', value='14,204'),
+        Quote(field='supplier', cell='c0', value='Описание'),
+    ], tables=[], issues=[])
+    proposal, proof, warnings, _, _ = apply_plan(source, plan)
+    assert proposal['documentNumber'] == proposal['documentDate'] == proposal['supplier'] == ''
+    assert not proof
+    assert sum('не соответствует типу' in warning for warning in warnings) == 3
 
 
-def test_failed_review_retains_extraction_with_visible_warning():
-    source, plan = sample()
-    with patch('backend.universal.model_available', return_value=True), patch('backend.universal.infer_plan', return_value=plan), patch(
-            'backend.universal.request_plan', side_effect=httpx.ReadTimeout('timeout')):
-        result, report = extract_universal(source, b'', 'unknown.pdf')
-    assert len(result[0]['items']) == 2
-    assert not report['reviewCompleted'] and not report['coverageComplete']
-    assert report['issues']
-
-
-def test_vision_routes_problem_pages_and_keeps_grounding(monkeypatch):
-    source, plan = sample()
-    source.ocr_pages = [1]
-    monkeypatch.setenv('LOCAL_VISION_ENABLED', 'true')
-    with patch('backend.universal.model_available', return_value=True), patch('backend.universal.infer_plan', return_value=plan), patch(
-            'backend.universal.request_plan', return_value=plan) as request, patch(
-            'backend.universal.page_images', return_value=['data:image/jpeg;base64,AA==']):
-        _, report = extract_universal(source, b'', 'unknown.pdf')
-    assert report['visionUsed']
-    assert request.call_args.kwargs['images']
-
-
-def test_model_unavailable_never_runs_rule_fallback():
+def test_ambiguous_rules_result_survives_unavailable_semantic_model():
     source, _ = sample()
     with patch('backend.universal.model_available', return_value=False), patch(
             'backend.rules.extract_rules') as rules:
         result, report = extract_universal(source, b'', 'unknown.pdf')
-    assert result is None
-    assert report['mode'] == 'model_error'
-    assert 'данные не извлечены' in report['issues'][0]
-    rules.assert_not_called()
+    assert result is not None
+    assert report['mode'] == 'rules_fallback'
+    assert not report['reviewCompleted']
+    assert report['llmCalls'] == 0
 
 
 @pytest.mark.parametrize('text,value', [('14,204', 14.204), ('48 600,0000', 48600),

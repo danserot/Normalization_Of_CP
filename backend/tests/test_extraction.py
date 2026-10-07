@@ -5,6 +5,7 @@ from io import BytesIO
 from unittest.mock import patch
 
 import pytest
+import fitz
 
 from backend.extraction import DocumentError, read_document
 from backend.pipeline import process_document
@@ -92,30 +93,45 @@ def test_invalid_signature_and_limits():
         read_document(b'a' * 200001, 'huge.txt')
 
 
-def test_text_pdf_never_runs_ocr(fixtures):
-    with patch('backend.extraction.ocr', side_effect=AssertionError('Unexpected OCR')):
-        result = process_document((fixtures / 'text.pdf').read_bytes(), 'text.pdf')
-    assert result['metadata']['ocrPages'] == 0
+def test_native_text_pdf_keeps_native_values_without_vision(fixtures, monkeypatch):
+    monkeypatch.setenv('VISION_ENABLED', 'false')
+    result = process_document((fixtures / 'text.pdf').read_bytes(), 'text.pdf')
+    assert all(cell['method'] == 'native' for cell in result['metadata']['sourceCells'])
 
 
-@pytest.mark.skipif(not os.getenv('TEST_OCR'), reason='Enable TEST_OCR=1 with local Tesseract installed')
-@pytest.mark.parametrize('name', ['scan.png', 'scan.jpg', 'scan.webp', 'scan.pdf', 'rotated.png'])
-def test_real_ocr(fixtures, name):
-    result = process_document((fixtures / name).read_bytes(), name)
-    assert result['metadata']['ocrPages'] == 1
+def test_images_and_scanned_pdf_report_unreadable_when_api_unavailable(fixtures, monkeypatch):
+    monkeypatch.setenv('VISION_ENABLED', 'false')
+    for filename in ('scan.png', 'scan.pdf'):
+        source = read_document((fixtures / filename).read_bytes(), filename)
+        assert source.routing['mandatory']
+        assert source.routing['available'] is False
+        assert source.routing['issues']
+        assert not source.text().strip()
+
+
+@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Enable TEST_VISION=1 with an OpenAI API key')
+def test_real_pdf_vision(fixtures, monkeypatch):
+    monkeypatch.setenv('VISION_ENABLED', 'true')
+    result = process_document((fixtures / 'scan.pdf').read_bytes(), 'scan.pdf')
+    assert result['metadata']['routing']['processed_pages'] == [1]
+    assert result['metadata']['routing']['used']
     assert result['proposal']['client'] == 'ТОО Альфа'
     assert result['metadata']['fieldEvidence']['client']['page'] == 1
-    assert 'ocr' in result['metadata']['fieldEvidence']['client']['method']
+    assert result['metadata']['fieldEvidence']['client']['source_method'] == 'openai-vision'
 
 
-@pytest.mark.skipif(not os.getenv('TEST_OCR'), reason='Requires Tesseract')
-def test_ocr_table_and_mixed_pdf(fixtures):
-    result = process_document((fixtures / 'table-scan.png').read_bytes(), 'table-scan.png')
+@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Requires a ready PaddleOCR-VL 1.6 service')
+def test_visual_table_and_mixed_pdf(fixtures, monkeypatch):
+    monkeypatch.setenv('VISION_ENABLED', 'true')
+    with fitz.open(stream=(fixtures / 'table-scan.png').read_bytes(), filetype='png') as image:
+        content = image.convert_to_pdf()
+    result = process_document(content, 'table-scan.pdf')
     assert result['proposal']['items'][0]['name'] == 'Кабель'
     assert result['proposal']['items'][0]['quantity'] == 2
     assert result['proposal']['items'][0]['unitPrice'] == 1234.56
     mixed = process_document((fixtures / 'mixed.pdf').read_bytes(), 'mixed.pdf')
-    assert mixed['metadata']['ocrPageNumbers'] == [2]
+    assert 2 in mixed['metadata']['routing']['processed_pages']
+    assert mixed['metadata']['routing']['used']
     assert len(mixed['proposal']['items']) == 2
 
 
@@ -142,10 +158,12 @@ def test_plain_text_is_split_into_text_and_table_blocks():
         'Товар;Количество;Цена\nКабель;2;100'.encode(), 'table.csv').cells)
 
 
-@pytest.mark.skipif(not os.getenv('TEST_OCR'), reason='Requires Tesseract kaz')
+@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Requires a ready multilingual PaddleOCR-VL 1.6 service')
 def test_kazakh_characters(fixtures, monkeypatch):
-    monkeypatch.setenv('TESSERACT_LANG', 'rus+eng+kaz')
-    result = process_document((fixtures / 'kazakh.png').read_bytes(), 'kazakh.png')
+    monkeypatch.setenv('VISION_ENABLED', 'true')
+    with fitz.open(stream=(fixtures / 'kazakh.png').read_bytes(), filetype='png') as image:
+        content = image.convert_to_pdf()
+    result = process_document(content, 'kazakh.pdf')
     assert result['proposal']['client'] == 'Әділ Ұйым'
     assert result['proposal']['supplier'] == 'Қазақ Өнім'
 
@@ -155,6 +173,28 @@ def test_column_permutations(columns):
     values = {'name': 'Кабель', 'quantity': '2', 'unitPrice': '100'}
     text = ';'.join(columns) + '\n' + ';'.join(values[c] for c in columns)
     assert process_document(text.encode(), 'test.csv')['proposal']['items'][0]['unitPrice'] == 100
+
+
+def test_multirow_alternative_cost_matrix_keeps_all_services_and_variants():
+    from backend.extraction import Source
+    source = Source('matrix.pdf')
+    for row, values in enumerate([
+        ['№', 'Наименование работ', 'Вариант A', '', 'Вариант B', ''],
+        ['', '', 'Стоимость', 'Стоимость', 'Стоимость', 'Стоимость'],
+        ['', '', 'СМР', 'ТМЦ', 'СМР', 'ТМЦ'],
+        ['1', 'Монтаж блока 1', '100', '200', '90', '180'],
+        ['2', 'Монтаж блока 2', '300', '400', '270', '360'],
+        ['', 'Всего', '400', '', '360', ''],
+    ], 1):
+        for col, value in enumerate(values, 1):
+            source.add(value, 'table-1', row, col, kind='table')
+    proposal, proof, warnings, _ = extract_rules(source)
+    assert [item['name'] for item in proposal['items']] == ['Монтаж блока 1', 'Монтаж блока 2']
+    assert [component['lineTotal'] for component in proposal['items'][0]['components']] == [100, 200, 90, 180]
+    assert proposal['documentTotal'] is None
+    assert [field['value'] for field in proposal['additionalFields']] == ['400', '360']
+    assert all(f'items.{index}.name' in proof for index in range(2))
+    assert any('альтернативные варианты' in warning for warning in warnings)
 
 
 @pytest.mark.parametrize('dimension', ['', '<dimension ref="A1:A1"/>'])

@@ -134,17 +134,17 @@ def test_task_metrics_penalize_missing_rows_and_wrong_references():
     assert result['grounded_references'] == result['exact_references'] == 0
 
 
-def test_empty_model_result_stays_empty_without_rule_fallback():
-    from backend.annotation_data import source_from_payload
-    from backend.universal import Plan, extract_universal
-    payload, _ = example()
-    source = source_from_payload(payload, 'synthetic.txt')
-    empty = Plan(fields=[], tables=[], issues=[])
-    with patch('backend.universal.model_available', return_value=True), \
-         patch('backend.universal.infer_plan', return_value=empty), \
-         patch('backend.universal.request_plan', return_value=empty):
+def test_optional_auto_mode_skips_model_for_complete_native_table(monkeypatch):
+    monkeypatch.setenv('SEMANTIC_MODEL_MODE', 'auto')
+    from backend.extraction import read_document
+    from backend.universal import extract_universal
+    source = read_document('Товар;Количество;Цена;Сумма\nКабель;2;100;200'.encode(), 'synthetic.csv')
+    with patch('backend.universal.model_available') as available, patch('backend.universal.infer_plan') as infer:
         result, report = extract_universal(source, b'', 'synthetic.txt')
     assert result is not None
-    assert result[0]['items'] == []
-    assert report['mode'] == 'model'
-    assert not report['coverageComplete']
+    assert result[0]['items']
+    assert report['mode'] == 'rules'
+    assert report['llmCalls'] == 0
+    assert report['coverageComplete']
+    available.assert_not_called()
+    infer.assert_not_called()

@@ -1,7 +1,12 @@
-FROM readdocument-backend:latest
-COPY backend/requirements-test.txt backend/requirements-test.txt
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+COPY backend/requirements.txt backend/requirements-test.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements-test.txt
 COPY backend ./backend
+COPY training ./training
+COPY services/vision/app.py ./services/vision/app.py
 COPY examples/mock_kp ./examples/mock_kp
-ENV TEST_OCR=1 LOCAL_MODEL_ENABLED=false
+# Test fixtures opt into mocked HTTP; no API key is embedded in this image.
 CMD ["python", "-m", "pytest", "backend/tests", "-q"]

@@ -35,7 +35,7 @@ def certified_layouts(payload, group):
         block = blocks[table.block]
         # A self-contained block with its own visible explicit headers needs
         # no previous layout. Do not create labels for headerless continuations.
-        answer = Layout.model_validate(table.model_dump(exclude={'block', 'reviewed'}))
+        answer = Layout.model_validate(table.model_dump(include=set(Layout.model_fields)))
         examples.append({'system': LAYOUT_SYSTEM,
             'instruction': json.dumps({**block, 'previousLayout': None}, ensure_ascii=False, separators=(',', ':')),
             'input': '', 'output': answer.model_dump_json()})

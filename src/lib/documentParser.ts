@@ -12,6 +12,7 @@ export type ProposalItem = {
   unitPrice: number | null;
   lineTotal?: number | null;
   components?: CostComponent[];
+  componentMode?: "additive" | "alternative";
   additionalFields?: AdditionalField[];
 };
 export type CommercialProposal = {
@@ -47,6 +48,14 @@ export type FieldEvidence = {
   confidence?: number;
   warning?: string;
   value?: string | number;
+  sourceId?: string;
+  sourceMethod?: string;
+  source_method?: string;
+  bbox?: [number, number, number, number] | null;
+  visionAgreement?: boolean | null;
+  vision_agreement?: boolean | null;
+  confidenceBasis?: string[];
+  confidenceKind?: "heuristic";
 };
 export type SourceCell = {
   id: string;
@@ -59,6 +68,25 @@ export type SourceCell = {
   sheet?: string | null;
   kind?: "text" | "table";
   method?: string;
+  column?: number;
+  bbox?: [number, number, number, number] | null;
+  source_method?: string;
+  rowspan?: number;
+  colspan?: number;
+  reading_order?: number;
+  vision_agreement?: boolean | null;
+};
+export type DocumentRouting = {
+  format?: string;
+  mandatory?: boolean;
+  requested?: boolean;
+  used?: boolean;
+  available?: boolean;
+  status?: "native" | "vision" | "fallback" | "limited";
+  required_pages?: number[];
+  processed_pages?: number[];
+  reasons?: string[];
+  issues?: string[];
 };
 export type ModelRun = {
   model: string;
@@ -67,6 +95,8 @@ export type ModelRun = {
   durationMs: number;
   proposal?: Partial<CommercialProposal>;
   confidence: number;
+  confidenceMethod?: string;
+  routing?: DocumentRouting;
   error?: string;
 };
 export type ExtractionMetadata = {
@@ -74,11 +104,17 @@ export type ExtractionMetadata = {
   parser: string;
   status: ParserStatus;
   confidence: number;
+  confidenceMethod?: string;
+  routing?: DocumentRouting;
   warnings: string[];
   outcome?: {
     state: "complete" | "partial" | "unavailable";
     message: string;
-    unavailable: { field: string; label: string }[];
+    unavailable: {
+      field: string;
+      label: string;
+      reason?: "absent" | "unreadable" | "unverified";
+    }[];
     ocrReviewPages?: number[];
   };
   fieldEvidence?: Record<string, FieldEvidence | FieldEvidence[]>;

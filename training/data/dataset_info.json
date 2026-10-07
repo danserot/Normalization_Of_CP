@@ -6,5 +6,17 @@
   "kp_val": {
     "file_name": "kp_val.json",
     "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
+  },
+  "kp_plan_train": {
+    "file_name": "kp_plan_train.json",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
+  },
+  "kp_plan_val": {
+    "file_name": "kp_plan_val.json",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
+  },
+  "kp_plan_test": {
+    "file_name": "kp_plan_test.json",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output", "system": "system"}
   }
 }

@@ -7,19 +7,21 @@ from pathlib import Path
 import pytest
 
 from backend.pipeline import process_document
+from backend.extraction import DocumentError, read_document
 from backend.rules import extract_rules
 
 
 SAMPLES = Path(__file__).resolve().parents[2] / 'examples' / 'mock_kp'
 TEXT_FORMATS = ('csv', 'docx', 'json', 'pdf', 'tsv', 'txt', 'xls', 'xlsx')
-OCR_FORMATS = ('jpg', 'png', 'webp')
+IMAGE_FORMATS = ('jpg', 'png', 'webp')
 
 
-@pytest.mark.parametrize('filename', [*(f'offer.{ext}' for ext in TEXT_FORMATS),
-                                      *(f'offer.{ext}' for ext in OCR_FORMATS), 'offer-scan.pdf'])
+@pytest.mark.parametrize('filename', [*(f'offer.{ext}' for ext in TEXT_FORMATS), 'offer-scan.pdf'])
 def test_mock_offer_fields_items_and_evidence(filename, monkeypatch):
-    if filename in (*[f'offer.{ext}' for ext in OCR_FORMATS], 'offer-scan.pdf') and not os.getenv('TEST_OCR'):
-        pytest.skip('Run with TEST_OCR=1 and Tesseract rus+eng')
+    if filename == 'offer-scan.pdf' and not os.getenv('TEST_VISION'):
+        pytest.skip('Run with TEST_VISION=1 and a ready PaddleOCR-VL 1.6 service')
+    if filename == 'offer-scan.pdf':
+        monkeypatch.setenv('VISION_ENABLED', 'true')
     monkeypatch.setenv('LOCAL_MODEL_ENABLED', 'false')
     def fixture_model(source, _content, _filename):
         proposal, proof, warnings, used = extract_rules(source)
@@ -48,3 +50,11 @@ def test_mock_offer_fields_items_and_evidence(filename, monkeypatch):
             assert source['id'] in cells
             assert source['excerpt'] == cells[source['id']]['text']
             assert source['file'] == filename
+
+
+@pytest.mark.parametrize('extension', IMAGE_FORMATS)
+def test_standalone_images_need_openai_configuration(extension):
+    source = read_document((SAMPLES / f'offer.{extension}').read_bytes(), f'offer.{extension}')
+    assert source.routing['mandatory']
+    assert source.routing['available'] is False
+    assert not source.text().strip()

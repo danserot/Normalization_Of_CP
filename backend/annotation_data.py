@@ -1,18 +1,19 @@
 """Human review data and inference-compatible training examples. No model calls."""
-import base64
 import hashlib
 import json
+import os
 import re
+from dataclasses import fields as dataclass_fields
 from html import escape
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 
 import fitz
 from docx import Document
 from docx.table import Table as WordTable
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
-from PIL import Image, ImageOps
 from pydantic import Field
 
 from .extraction import Cell, DocumentError, Source, check_zip, decode, read_document
@@ -30,6 +31,9 @@ class MarkedField(Strict):
 class MarkedTable(Layout):
     block: str = Field(max_length=200)
     reviewed: bool = False
+    componentMode: Literal['additive', 'alternative'] = 'additive'
+    unitPriceColumn: int = Field(default=0, ge=0, le=100)
+    lineTotalColumn: int = Field(default=0, ge=0, le=100)
 
 
 class Annotation(Strict):
@@ -47,7 +51,24 @@ class SaveAnnotation(Strict):
 
 
 def source_from_payload(payload, filename):
-    return Source(file=filename, cells=[Cell(**cell) for cell in payload['cells']])
+    """Re-open stored sources, including snapshots made before canonical fusion."""
+    supported = {field.name for field in dataclass_fields(Cell)}
+    aliases = {'sourceMethod': 'source_method', 'visionAgreement': 'vision_agreement',
+               'readingOrder': 'reading_order', 'rowSpan': 'rowspan', 'columnSpan': 'colspan'}
+    cells = []
+    for raw in payload['cells']:
+        cell = {aliases.get(key, key): value for key, value in raw.items()}
+        if 'cell' not in cell and 'column' in cell:
+            cell['cell'] = cell['column']
+        cells.append(Cell(**{key: value for key, value in cell.items() if key in supported}))
+    source = Source(file=filename, cells=cells)
+    source.warnings = list(payload.get('warnings', []))
+    source.pages = max((cell.page or 0 for cell in cells), default=0)
+    source.tables = len({cell.block for cell in cells if cell.kind == 'table'})
+    source.chars = sum(len(cell.text) for cell in cells)
+    if hasattr(source, 'routing'):
+        source.routing = dict(payload.get('routing', {}))
+    return source
 
 
 def draft_annotation(source, proof):
@@ -85,12 +106,13 @@ def draft_annotation(source, proof):
                        'nameColumn': roles['name'][1] if roles['name'] else 0,
                        'quantityColumn': roles['quantity'][1] if roles['quantity'] else 0,
                        'unitColumn': roles['unit'][1] if roles['unit'] else 0,
-                       'components': components, 'extras': []})
+                       'components': components, 'extras': [], 'componentMode': 'additive',
+                       'unitPriceColumn': 0, 'lineTotalColumn': 0})
     return {'fields': fields, 'tables': tables, 'issues': [], 'group': '', 'notes': ''}
 
 
 def word_preview(content):
-    """Safe content preview, preserving document order and inline raster images."""
+    """Safe text/table preview. Embedded raster images are intentionally ignored."""
     check_zip(content)
     doc = Document(BytesIO(content))
 
@@ -109,21 +131,6 @@ def word_preview(content):
             if run.italic:
                 text = '<em>' + text + '</em>'
             parts.append(text)
-            for node in run._element.xpath('.//a:blip'):
-                rid = node.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                relation = paragraph.part.rels.get(rid)
-                if relation is None or relation.is_external:
-                    continue
-                try:
-                    with Image.open(BytesIO(relation.target_part.blob)) as image:
-                        image = ImageOps.exif_transpose(image)
-                        image.thumbnail((1600, 1600))
-                        output = BytesIO()
-                        image.convert('RGB').save(output, format='JPEG', quality=85)
-                    parts.append('<img alt="Изображение документа" src="data:image/jpeg;base64,'
-                                 + base64.b64encode(output.getvalue()).decode('ascii') + '">')
-                except (OSError, ValueError):
-                    parts.append('<small>Встроенное изображение не поддерживается</small>')
         if not parts:
             parts.append(escape(paragraph.text))
         return '<p>' + ''.join(parts) + '</p>'
@@ -156,12 +163,6 @@ def prepare_annotation(content, filename):
             if pdf.needs_pass or not 0 < len(pdf) <= 50:
                 raise DocumentError('PDF защищён паролем или превышает 50 страниц')
             preview = {'kind': 'pdf', 'pages': len(pdf)}
-    elif suffix in {'.png', '.jpg', '.jpeg', '.webp'}:
-        with Image.open(BytesIO(content)) as image:
-            if image.width * image.height > 20_000_000:
-                raise DocumentError('Изображение превышает 20 миллионов пикселей')
-            image.verify()
-        preview = {'kind': 'image'}
     elif suffix == '.docx':
         preview = {'kind': 'word', 'html': word_preview(content)}
     elif suffix in {'.txt', '.json'}:
@@ -174,13 +175,15 @@ def prepare_annotation(content, filename):
     try:
         source = read_document(content, filename)
     except DocumentError as error:
-        # Originals remain viewable when OCR is unavailable; never export bad input.
-        if preview['kind'] not in {'pdf', 'image', 'word', 'text'}:
+        if preview['kind'] not in {'pdf', 'word', 'text'}:
             raise
         return {'cells': [], 'warnings': [str(error)], 'parseError': str(error), 'preview': preview,
                 'annotation': draft_annotation(Source(filename), {})}
     proposal, proof, warnings, _ = extract_rules(source)
-    return {'cells': source.public(), 'warnings': warnings, 'parseError': '', 'preview': preview,
+    return {'cells': source.public(), 'warnings': list(dict.fromkeys([*source.warnings, *warnings])),
+            'routing': getattr(source, 'routing', {}),
+            'canonicalDocument': source.structure() if hasattr(source, 'structure') else {},
+            'parseError': '', 'preview': preview,
             'suggestion': proposal, 'annotation': draft_annotation(source, proof)}
 
 
@@ -220,7 +223,8 @@ def validate_annotation(annotation, payload, filename, reviewed):
             raise ValueError(f'{table.block}: неверный диапазон строк')
         if not 1 <= table.nameColumn <= width:
             raise ValueError(f'{table.block}: выберите колонку наименования')
-        columns = [table.nameColumn, table.quantityColumn, table.unitColumn]
+        columns = [table.nameColumn, table.quantityColumn, table.unitColumn,
+                   table.unitPriceColumn, table.lineTotalColumn]
         for component in table.components:
             columns.extend([component.priceColumn, component.totalColumn])
             if not component.priceColumn and not component.totalColumn:
@@ -261,7 +265,7 @@ def training_examples(annotation, payload, filename):
         table = layouts.get(block['block'])
         if table is None:
             continue
-        answer = table.model_dump(exclude={'block', 'reviewed'})
+        answer = table.model_dump(include=set(Layout.model_fields))
         if not table.isItems:
             answer.update(nameColumn=0, quantityColumn=0, unitColumn=0, components=[], extras=[],
                           firstRow=block['firstRow'], lastRow=block['lastRow'])
@@ -274,6 +278,48 @@ def training_examples(annotation, payload, filename):
                   for f in annotation.fields if f.state == 'found' and f.cell in ids]
         add(REQUISITES_SYSTEM, batch, {'fields': fields})
     return result
+
+
+def plan_training_examples(annotation, payload, filename):
+    """One compact semantic plan; Python retains responsibility for all item rows."""
+    from .universal import PLAN_SYSTEM, Plan, Quote, Table, plan_payload
+
+    source = source_from_payload(payload, filename)
+    answer = Plan(
+        fields=[Quote(field=field.field, cell=field.cell, value=field.value)
+                for field in annotation.fields if field.state == 'found'],
+        tables=[Table.model_validate(table.model_dump(exclude={'isItems', 'reviewed'}))
+                for table in annotation.tables if table.isItems],
+        # Reviewer notes/issues are audit information, not sourced model answers.
+        issues=[],
+    )
+    model_input = plan_payload(source)
+    visible_ids = set()
+
+    def collect_ids(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key == 'cells':
+                    visible_ids.update(cell[0] for cell in nested)
+                else:
+                    collect_ids(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect_ids(nested)
+
+    collect_ids(model_input)
+    references = {field.cell for field in answer.fields}
+    references.update(column.labelCell for table in answer.tables
+                      for column in [*table.components, *table.extras])
+    if not references <= visible_ids:
+        raise DocumentError('Проверенные ссылки отсутствуют в компактном контексте модели; уточните структуру документа')
+    instruction = json.dumps(model_input, ensure_ascii=False, separators=(',', ':'))
+    context_limit = int(os.getenv('SEMANTIC_CONTEXT_CHARS', os.getenv('SEMANTIC_CONTEXT_CHAR_LIMIT', '60000')))
+    if len(instruction) > context_limit:
+        raise DocumentError('Документ превышает лимит semantic context; экспорт с обрезанными ссылками запрещён')
+    return [{'system': PLAN_SYSTEM,
+             'instruction': instruction,
+             'input': '', 'output': answer.model_dump_json()}]
 
 
 def group_split(group):

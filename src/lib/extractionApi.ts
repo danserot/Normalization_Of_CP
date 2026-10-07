@@ -1,7 +1,10 @@
 import type { ParseResult } from "./documentParser";
 
 const backendFormats =
-  /\.(pdf|docx|xlsx|xls|csv|tsv|txt|json|png|jpe?g|webp)$/i;
+  /\.(pdf|docx|xlsx|xls|csv|tsv|txt|json|png|jpe?g|webp|bmp|tiff?)$/i;
+
+export const extractionFileAccept =
+  ".pdf,.docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif";
 
 export const canUseExtractionApi = (file: File) =>
   backendFormats.test(file.name);
@@ -12,6 +15,7 @@ export type ExtractionModel = {
   description: string;
   size: string;
   recommended?: boolean;
+  configured?: boolean;
   installed?: boolean;
 };
 
@@ -40,19 +44,27 @@ export const parseWithExtractionApi = async (
   const body = new FormData();
   body.append("file", file);
   body.append("models", JSON.stringify(models));
-  const response = await fetch("/api/extract", {
-    method: "POST",
-    body,
-    credentials: "include",
-    signal: AbortSignal.timeout(750_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/extract", {
+      method: "POST",
+      body,
+      credentials: "include",
+      signal: AbortSignal.timeout(750_000),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "TimeoutError")
+      throw new Error("Время ожидания OpenAI API истекло. Повторите чтение документа.", { cause });
+    throw new Error("Не удалось связаться с сервером распознавания. Проверьте подключение и повторите чтение.", { cause });
+  }
   if (!response.ok) {
     notifyUnauthorized(response.status);
     const payload = (await response.json().catch(() => ({}))) as {
       detail?: string;
     };
     throw new Error(
-      payload.detail || `Сервер распознавания вернул ${response.status}`,
+      typeof payload.detail === "string" ? payload.detail :
+      `Сервер распознавания вернул ${response.status}`,
     );
   }
   return response.json() as Promise<ParseResult>;

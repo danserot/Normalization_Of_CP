@@ -1,0 +1,12 @@
+{
+  "quarantined_documents": 1,
+  "quarantined_files": 1,
+  "remaining_files": 0,
+  "database_marked": 0,
+  "active_dataset_examples": {
+    "train": 0,
+    "val": 0,
+    "test": 0
+  },
+  "reversible": true
+}

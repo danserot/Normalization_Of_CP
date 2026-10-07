@@ -123,6 +123,18 @@
   background: #f3fbfc;
   box-shadow: 0 0 0 1px #2c97a922;
 }
+.provider-card {
+  width: 100%;
+  min-height: 112px;
+}
+.provider-card.unavailable {
+  border-color: #dbad79;
+  background: #fff9f1;
+}
+.provider-card.unavailable .model-check {
+  color: #8a5829;
+  border-color: #dbad79;
+}
 .model-check {
   position: absolute;
   left: 15px;
@@ -425,6 +437,47 @@
 .item-data details {
   grid-column: 1/-1;
   min-width: 0;
+  color: #52616d;
+}
+.item-missing {
+  display: block;
+  margin-top: 5px;
+  color: #687984;
+  line-height: 1.45;
+}
+.item-costs {
+  grid-column: 1/-1;
+  min-width: 0;
+}
+.item-costs p {
+  margin: 0 0 8px;
+  color: #52616d;
+}
+.item-cost-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 8px;
+}
+.item-cost {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: #f6f9fa;
+  border: 1px solid #e5edf0;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.item-data .item-cost span,
+.item-data .item-cost strong {
+  text-align: left;
+}
+.item-cost > span:first-child {
+  font-weight: 600;
+}
+.item-costs > small {
+  display: block;
+  margin-top: 8px;
   color: #52616d;
 }
 .item-data summary {

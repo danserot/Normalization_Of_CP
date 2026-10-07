@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent, FormEvent } from "react";
 import {
   canUseExtractionApi,
+  extractionFileAccept,
   getExtractionModels,
   parseWithExtractionApi,
   submitProposal,
@@ -11,10 +12,10 @@ import type {
   CommercialProposal,
   ExtractionMetadata,
   FieldEvidence,
-  ModelRun,
 } from "./lib/documentParser";
 import "./App.css";
 import AnnotationWorkspace from "./AnnotationWorkspace";
+import { sourceMethodLabel } from "./lib/sourceEvidence";
 
 type Upload = {
   file: File;
@@ -46,7 +47,11 @@ function EvidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
         </li>
       </ul>
       <p>
-        Перед сохранением проверьте смысл поля, OCR, конфликты и суммы по
+        Проценты — оценка надёжности по правилам проверки источника, структуры и
+        расчётов. Это эвристика backend, а не измеренная точность распознавания.
+      </p>
+      <p>
+        Перед сохранением проверьте смысл поля, конфликты и суммы по
         оригиналу.
       </p>
     </details>
@@ -54,14 +59,13 @@ function EvidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
 }
 const builtInModels: ExtractionModel[] = [
   {
-    id: "local",
-    name: "Локальное извлечение",
-    description: "Универсальное извлечение структуры КП и проверка источников",
-    size: "CPU по умолчанию; GPU-профиль при настройке",
+    id: "openai",
+    name: "ChatGPT · OpenAI API",
+    description: "Чтение документов, изображений и сканов с привязкой значений к источнику",
+    size: "Модель задаётся в настройках сервера",
     recommended: true,
   },
 ];
-const defaultComparisonModels = builtInModels.map(({ id }) => id);
 const blank: CommercialProposal = {
   title: "",
   client: "",
@@ -98,7 +102,7 @@ const textFields: Array<[keyof CommercialProposal, string]> = [
   ["warranty", "Гарантия"],
 ];
 const money = (value: number | null, currency: string) => {
-  if (value === null) return "Не удалось извлечь";
+  if (value === null) return "Не указано в КП";
 
   const known =
     (
@@ -128,7 +132,7 @@ const itemSum = (item: CommercialProposal["items"][number]): number | null =>
     null
   : item.quantity * item.unitPrice);
 const sumItems = (items: CommercialProposal["items"]): number | null =>
-  items.some((item) => itemSum(item) === null) ? null : (
+  !items.length || items.some((item) => itemSum(item) === null) ? null : (
     items.reduce((sum, item) => sum + (itemSum(item) ?? 0), 0)
   );
 const asEvidence = (
@@ -137,6 +141,10 @@ const asEvidence = (
   !value ? []
   : Array.isArray(value) ? value
   : [value];
+const unavailableLabel = (reason?: "absent" | "unreadable" | "unverified") =>
+  reason === "absent" ? "Не указано в КП"
+  : reason === "unreadable" ? "Не удалось прочитать"
+  : "Требуется проверка";
 
 const mergeUploads = (uploads: Upload[]): CommercialProposal =>
   uploads
@@ -196,10 +204,7 @@ function App() {
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [models, setModels] = useState<ExtractionModel[]>(builtInModels);
-  const [selectionMode, setSelectionMode] = useState<"single" | "compare">(
-    "single",
-  );
-  const [selectedModels, setSelectedModels] = useState<string[]>(["local"]);
+  const [modelsError, setModelsError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const editOriginal = useRef<CommercialProposal>(blank);
   const submissionKey = useRef(crypto.randomUUID());
@@ -246,47 +251,49 @@ function App() {
     let active = true;
     void getExtractionModels()
       .then((availableModels) => {
-        if (!active || !availableModels.length) return;
-        setModels(availableModels);
-        setSelectedModels((current) => {
-          const valid = current.filter((id) =>
-            availableModels.some((model) => model.id === id),
-          );
-          return valid.length ? valid : [availableModels[0].id];
-        });
+        if (!active) return;
+        const openai = availableModels.find((model) => model.id === "openai");
+        if (!openai) {
+          setModelsError("Сервер не поддерживает OpenAI API. Обновите backend.");
+          return;
+        }
+        setModels([openai]);
+        setModelsError("");
       })
-      .catch(() => undefined);
+      .catch((cause) => {
+        if (active) setModelsError(cause instanceof Error ? cause.message : "Не удалось проверить настройки OpenAI API");
+      });
     return () => {
       active = false;
     };
   }, [authorized, sessionChecked]);
   const total = useMemo(() => sumItems(proposal.items), [proposal.items]);
 
-  const changeSelectionMode = (mode: "single" | "compare") => {
-    setSelectionMode(mode);
-    setSelectedModels((current) =>
-      mode === "single" ?
-        [current[0] ?? models[0].id]
-      : Array.from(
-          new Set([
-            current[0] ?? models[0].id,
-            ...models
-              .filter(({ id }) => defaultComparisonModels.includes(id))
-              .map(({ id }) => id),
-            ...models.map(({ id }) => id),
-          ]),
-        ).slice(0, 4),
+  const missingValue = (field: string) => {
+    const successful = uploads.filter((upload) => !upload.error);
+    if (!successful.length) return "Не удалось извлечь данные";
+    if (uploads.some((upload) => upload.error))
+      return "Не удалось проверить во всех файлах";
+    const reasons = successful.flatMap(({ metadata }) =>
+      (metadata.outcome?.unavailable ?? [])
+        .filter((entry) => entry.field === field)
+        .map((entry) => entry.reason),
     );
+    if (reasons.includes("unreadable")) return "Не удалось прочитать";
+    if (reasons.some((reason) => reason !== "absent")) return "Требуется проверка";
+    return "Не указано в КП";
   };
-  const toggleModel = (modelId: string) => {
-    setSelectedModels((current) => {
-      if (selectionMode === "single") return [modelId];
-      if (current.includes(modelId))
-        return current.length > 2 ?
-            current.filter((id) => id !== modelId)
-          : current;
-      return current.length < 4 ? [...current, modelId] : current;
-    });
+  const itemMissingValue = (item: CommercialProposal["items"][number], field: string) => {
+    for (const upload of uploads.filter((source) => !source.error)) {
+      const index = (upload.proposal.items ?? []).indexOf(item);
+      if (index < 0) continue;
+      const entry = upload.metadata.outcome?.unavailable.find(
+        (candidate) => candidate.field === `items.${index}.${field}`,
+      );
+      if (entry) return unavailableLabel(entry.reason);
+      return upload.metadata.verification?.reviewCompleted ? "Не указано в КП" : "Требуется проверка";
+    }
+    return "Требуется проверка";
   };
 
   const processFiles = async (files: File[]) => {
@@ -308,9 +315,11 @@ function App() {
     setSaved(null);
     submissionKey.current = crypto.randomUUID();
     try {
-      const results: Upload[] = [];
-      for (const { file, error: sizeError } of acceptable) {
-        const upload = await (async (): Promise<Upload> => {
+      const results: Array<Upload | undefined> = new Array(acceptable.length);
+      const activeFiles = new Map<number, string>();
+      let nextIndex = 0;
+      let done = 0;
+      const readFile = async (file: File, sizeError: string): Promise<Upload> => {
           if (sizeError)
             return {
               file,
@@ -327,7 +336,7 @@ function App() {
           try {
             if (!canUseExtractionApi(file))
               throw new Error("Формат файла не поддерживается");
-            const result = await parseWithExtractionApi(file, selectedModels);
+            const result = await parseWithExtractionApi(file, ["openai"]);
             return {
               file,
               proposal: result.proposal,
@@ -336,9 +345,10 @@ function App() {
                 (
                   result.metadata.status === "error" ||
                   result.metadata.status === "unsupported" ||
-                  result.metadata.status === "empty"
+                  (result.metadata.status === "empty" &&
+                    (!result.metadata.outcome || result.metadata.outcome.unavailable.some((entry) => entry.reason !== "absent")))
                 ) ?
-                  result.metadata.warnings[0]
+                  result.metadata.warnings[0] || "Не удалось прочитать документ"
                 : undefined,
             };
           } catch (cause) {
@@ -347,7 +357,7 @@ function App() {
               proposal: {},
               metadata: {
                 sourceName: file.name,
-                parser: "Локальное извлечение",
+                parser: "OpenAI API",
                 status: "error",
                 confidence: 0,
                 warnings: [
@@ -362,16 +372,22 @@ function App() {
                 : "Не удалось извлечь данные",
             };
           }
-        })();
-        results.push(upload);
-        setUploads([...results]);
-        setReadProgress({
-          done: results.length,
-          total: acceptable.length,
-          current: acceptable[results.length]?.file.name ?? "",
-        });
-      }
-      const successful = results.filter((upload) => !upload.error);
+      };
+      const worker = async () => {
+        while (nextIndex < acceptable.length) {
+          const index = nextIndex++;
+          const { file, error: sizeError } = acceptable[index];
+          activeFiles.set(index, file.name);
+          setReadProgress({ done, total: acceptable.length, current: [...activeFiles.values()].join(" · ") });
+          results[index] = await readFile(file, sizeError);
+          activeFiles.delete(index);
+          done += 1;
+          setUploads(results.filter((upload): upload is Upload => upload !== undefined));
+          setReadProgress({ done, total: acceptable.length, current: [...activeFiles.values()].join(" · ") });
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(2, acceptable.length) }, worker));
+      const successful = results.filter((upload): upload is Upload => !!upload && !upload.error);
       setProposal(mergeUploads(successful));
       setEditing(false);
       setConfirmed(false);
@@ -486,7 +502,9 @@ function App() {
             original.name === item.name &&
             original.quantity === item.quantity &&
             original.unitPrice === item.unitPrice &&
-            original.unit === item.unit
+            original.unit === item.unit &&
+            original.lineTotal === item.lineTotal &&
+            JSON.stringify(original.components ?? []) === JSON.stringify(item.components ?? [])
           ) ?
             Object.entries(upload.metadata.fieldEvidence ?? {})
               .filter(([key]) => key.startsWith(`items.${index}.`))
@@ -494,6 +512,14 @@ function App() {
           : [],
         ),
       );
+  const additionalEvidence = (field: { label: string; value: string }) =>
+    uploads.filter((upload) => !upload.error).flatMap((upload) =>
+      (upload.proposal.additionalFields ?? []).flatMap((original, index) =>
+        original.label === field.label && original.value === field.value ?
+          asEvidence(upload.metadata.fieldEvidence?.[`additionalFields.${index}.value`])
+        : [],
+      ),
+    );
   const duplicateItems = proposal.items.filter(
     (item, index) =>
       proposal.items.findIndex(
@@ -503,21 +529,19 @@ function App() {
       ) !== index,
   );
   const validation = [
-    ...(!proposal.client.trim() ? ["Укажите клиента"] : []),
-    ...(!proposal.validUntil.trim() ? ["Уточните срок действия"] : []),
     ...(!proposal.items.length ? ["Добавьте хотя бы одну позицию"] : []),
     ...proposal.items.flatMap((item, index) => [
       ...(!item.name.trim() ?
         [`Позиция ${index + 1}: не указано название`]
       : []),
-      ...(!((item.quantity ?? 0) > 0) ?
+      ...(item.quantity !== null && (!Number.isFinite(item.quantity) || item.quantity < 0) ?
         [
-          `${item.name || `Позиция ${index + 1}`}: количество должно быть больше нуля`,
+          `${item.name || `Позиция ${index + 1}`}: количество должно быть не меньше нуля`,
         ]
       : []),
-      ...(item.unitPrice === null || item.unitPrice < 0 ?
+      ...(item.unitPrice !== null && (!Number.isFinite(item.unitPrice) || item.unitPrice < 0) ?
         [
-          `${item.name || `Позиция ${index + 1}`}: укажите цену (не меньше нуля)`,
+          `${item.name || `Позиция ${index + 1}`}: цена должна быть не меньше нуля`,
         ]
       : []),
     ]),
@@ -548,23 +572,6 @@ function App() {
     setResolvedConflicts((current) =>
       current.includes(key) ? current : [...current, key],
     );
-  };
-  const useModelResult = (uploadIndex: number, run: ModelRun) => {
-    if (!run.proposal) return;
-    const updatedUploads = uploads.map((upload, index) =>
-      index === uploadIndex ?
-        {
-          ...upload,
-          proposal: { ...run.proposal!, notes: upload.proposal.notes ?? "" },
-        }
-      : upload,
-    );
-    setUploads(updatedUploads);
-    setProposal(mergeUploads(updatedUploads));
-    setResolvedConflicts([]);
-    setConfirmed(false);
-    setSaved(null);
-    submissionKey.current = crypto.randomUUID();
   };
   const send = async () => {
     setSubmitting(true);
@@ -692,16 +699,16 @@ function App() {
           <span className="eyebrow">READ DOCUMENT</span>
           <h1>Чтение коммерческого предложения</h1>
           <p>
-            Загрузите документы — проверьте извлеченные данные и сохраните их в
-            системе.
+            ChatGPT читает документы и изображения. Проверьте данные по
+            оригиналу и сохраните результат.
           </p>
         </div>
         <div className="header-actions">
           <button className="outline-cta" disabled={reading || submitting} onClick={() => setWorkspace("annotation")}>
-            Разметка для обучения
+            Проверка документов
           </button>
           {uploads.length > 0 && (
-            <button className="outline-cta" onClick={reset}>
+            <button className="outline-cta" disabled={reading || submitting} onClick={reset}>
               Новое чтение
             </button>
           )}
@@ -719,13 +726,7 @@ function App() {
           </div>
         )}
         {uploads.length === 0 && !reading && (
-          <ModelSelector
-            models={models}
-            selected={selectedModels}
-            mode={selectionMode}
-            onModeChange={changeSelectionMode}
-            onToggle={toggleModel}
-          />
+          <OpenAIProvider model={models[0]} error={modelsError} />
         )}
         {uploads.length === 0 && !reading && (
           <div
@@ -741,7 +742,7 @@ function App() {
               ref={inputRef}
               type="file"
               multiple
-              accept=".docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.pdf,.png,.jpg,.jpeg,.webp"
+              accept={extractionFileAccept}
               onChange={onInput}
             />
             <div className="upload-icon">↑</div>
@@ -753,31 +754,25 @@ function App() {
               PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл
             </small>
             <small className="privacy-note">
-              Все документы обрабатываются локально. Tesseract читает
-              сканы, локальная модель определяет поля и структуру таблиц. Документы и
-              результаты не отправляются во внешние сервисы.
+              Изображения и сканы отправляются в OpenAI API для чтения текста.
+              Содержимое остальных документов также обрабатывает ChatGPT.
+              Отсутствующие данные отмечаются «Не указано в КП»; ошибки чтения
+              показываются отдельно. Ключ API хранится на сервере.
             </small>
           </div>
         )}
         {reading && (
           <div className="analysis">
             <div className="spinner" />
-            <h2>
-              {selectedModels.length > 1 ?
-                `Сравниваем ${selectedModels.length} модели`
-              : "Читаем документы"}
-            </h2>
+            <h2>ChatGPT читает документы</h2>
             <p>
-              Готово {readProgress.done} из {readProgress.total}. Документы
-              обрабатываются по одному, и результат каждого сохраняется по мере
+              Готово {readProgress.done} из {readProgress.total}. До двух файлов
+              обрабатываются одновременно; результат каждого сохраняется по мере
               завершения.
             </p>
             {readProgress.current && <small className="active-models">Сейчас: {readProgress.current}</small>}
             <small className="active-models">
-              {models
-                .filter(({ id }) => selectedModels.includes(id))
-                .map(({ name }) => name)
-                .join(" → ")}
+              {models[0].name}
             </small>
           </div>
         )}
@@ -821,15 +816,15 @@ function App() {
                     {fileError ?
                       fileError
                     : metadata.outcome && metadata.outcome.state !== "complete" ? metadata.outcome.message
-                    : `✓ ${metadata.parser}${metadata.ocrPages ? ` · OCR страницы ${metadata.ocrPageNumbers?.join(", ")}` : ""}${metadata.cacheHit ? " · из локального кэша" : ""}`
+                    : `✓ ${metadata.parser}${metadata.ocrPages ? ` · прочитаны страницы ${metadata.ocrPageNumbers?.join(", ")}` : ""}${metadata.cacheHit ? " · из кэша сервера" : ""}`
                     }
                   </span>
                   {!fileError && <EvidenceExplanation metadata={metadata} />}
-                  {!!metadata.ocrQuality?.length && (
+                  {metadata.routing && (
                     <p className="validation-note">
-                      Качество OCR по Tesseract (ориентир, не точность полей): {metadata.ocrQuality.map(({ page, meanConfidence }) =>
-                        `стр. ${page}: ${meanConfidence === null ? "не оценено" : `${Math.round(meanConfidence)}%`}`,
-                      ).join(" · ")}
+                      Структура документа: {metadata.routing.used ? "проверена визуально" : "прочитана из файла"}
+                      {metadata.routing.processed_pages?.length ? ` · страницы ${metadata.routing.processed_pages.join(", ")}` : ""}
+                      {metadata.routing.mandatory && !metadata.routing.used ? " · требуется визуальная проверка" : ""}
                     </p>
                   )}
                   {!!metadata.timingsMs && (
@@ -839,17 +834,17 @@ function App() {
                   )}
                   {!!metadata.outcome?.unavailable.length && (
                     <details className="validation-note">
-                      <summary>Не удалось извлечь ({metadata.outcome.unavailable.length})</summary>
+                      <summary>Поля без подтверждённого значения ({metadata.outcome.unavailable.length})</summary>
                       <ul>{metadata.outcome.unavailable.map((entry) => (
-                        <li key={entry.field}>{entry.label}</li>
+                        <li key={entry.field}>{entry.label}: {unavailableLabel(entry.reason)}</li>
                       ))}</ul>
                     </details>
                   )}
                   {metadata.verification && (
                     <p className="validation-note">
                       {metadata.verification.mode === "model_error" ?
-                        "Локальная модель не смогла извлечь данные"
-                      : `Повторная проверка: ${metadata.verification.reviewCompleted ? "завершена или не требовалась" : "не завершена"} · спорных строк отправлено модели: ${metadata.verification.targetedReviewRows ?? metadata.verification.unclaimedRows.length} · визуальное чтение: ${metadata.verification.visionUsed ? "выполнено" : "не выполнялось"}`
+                        "OpenAI API не смог извлечь данные"
+                      : `Охват товарных строк: ${metadata.verification.coverageComplete ? "все строки учтены" : `не проверено строк: ${metadata.verification.unclaimedRows.length}`} · визуальное чтение: ${metadata.verification.visionUsed ? "выполнено" : "не выполнялось"}`
                       }
                     </p>
                   )}
@@ -878,15 +873,6 @@ function App() {
                       `${file.name}-${index}` === previewFile,
                   )!
                 }
-              />
-            )}
-            {uploads.some(
-              ({ metadata }) => (metadata.modelRuns?.length ?? 0) > 1,
-            ) && (
-              <ModelComparison
-                uploads={uploads}
-                currency={proposal.currency}
-                onUse={useModelResult}
               />
             )}
             {conflicts.length > 0 && (
@@ -946,7 +932,8 @@ function App() {
                   <DataField
                     key={key}
                     label={label}
-                    value={String(proposal[key] || "Не удалось извлечь")}
+                    value={String(proposal[key] || missingValue(key))}
+                    rawValue={typeof proposal[key] === "string" ? proposal[key] : undefined}
                     evidence={uploads.flatMap(({ metadata }) =>
                       asEvidence(metadata.fieldEvidence?.[key]),
                     )}
@@ -954,17 +941,16 @@ function App() {
                 ))}
                 <DataField
                   label="Итог по позициям"
-                  value={money(total, proposal.currency)}
+                  value={total === null ? "Недостаточно данных для расчёта" : money(total, proposal.currency)}
                 />
-                {proposal.documentTotal !== null && (
-                  <DataField
+                <DataField
                     label="Итог из документа"
-                    value={money(proposal.documentTotal, proposal.currency)}
+                    value={proposal.documentTotal === null ? missingValue("documentTotal") : money(proposal.documentTotal, proposal.currency)}
+                    rawValue={proposal.documentTotal ?? undefined}
                     evidence={uploads.flatMap(({ metadata }) =>
                       asEvidence(metadata.fieldEvidence?.documentTotal),
                     )}
                   />
-                )}
                 {proposal.items.length > 0 && (
                   <div className="items-data">
                     <h3>Позиции</h3>
@@ -973,23 +959,40 @@ function App() {
                         className={`item-data ${duplicateItems.includes(item) ? "duplicate-item" : ""}`}
                         key={`${item.name}-${index}`}>
                         <span>
-                          {item.name || "Без названия"}
+                          {item.name || itemMissingValue(item, "name")}
                           {duplicateItems.includes(item) && (
                             <small> Возможный дубль из нескольких файлов</small>
                           )}
                         </span>
                         <span>
-                          {item.quantity ?? "Количество: не удалось извлечь"} {item.unit}
+                          {item.quantity === null ? `Количество: ${itemMissingValue(item, "quantity")}` : `${item.quantity} ${item.unit}`}
+                          {!item.unit && <small className="item-missing">Единица: {itemMissingValue(item, "unit")}</small>}
+                          <small className="item-missing">Цена за единицу: {item.unitPrice === null ? itemMissingValue(item, "unitPrice") : money(item.unitPrice, proposal.currency)}</small>
                         </span>
                         <strong>
-                          {money(itemSum(item), proposal.currency)}
+                          {itemSum(item) === null && !!item.components?.length ?
+                            "Стоимость по компонентам"
+                          : itemSum(item) === null ? itemMissingValue(item, "lineTotal")
+                          : money(itemSum(item), proposal.currency)}
                         </strong>
+                        {!!item.components?.length && (
+                          <div className="item-costs">
+                            <p>{item.componentMode === "alternative" ? "Альтернативные варианты стоимости" : "Составляющие стоимости"}</p>
+                            <div className="item-cost-grid">
+                              {item.components.map((component, componentIndex) => (
+                                <div className="item-cost" key={`${component.label}-${componentIndex}`}>
+                                  <span>{component.label}</span>
+                                  {component.unitPrice !== null && <span>Цена за единицу: {money(component.unitPrice, proposal.currency)}</span>}
+                                  {component.lineTotal !== null && <strong>Сумма: {money(component.lineTotal, proposal.currency)}</strong>}
+                                  {component.unitPrice === null && component.lineTotal === null && <span>Стоимость: {itemMissingValue(item, `components.${componentIndex}.lineTotal`)}</span>}
+                                </div>
+                              ))}
+                            </div>
+                            {item.componentMode === "alternative" && <small>Варианты сохраняются отдельно и не складываются.</small>}
+                          </div>
+                        )}
                         <details>
                           <summary>Источники значений</summary>
-                          {(item.components ?? []).map((component, ci) => (
-                            <DataField key={`cost-${ci}`} label={component.label}
-                              value={`Цена ${money(component.unitPrice, proposal.currency)} · сумма ${money(component.lineTotal, proposal.currency)}`} />
-                          ))}
                           {(item.additionalFields ?? []).map((field, fi) => (
                             <DataField key={`extra-${fi}`} label={field.label} value={field.value} />
                           ))}
@@ -1010,7 +1013,7 @@ function App() {
                     ))}
                     <div className="total-data">
                       <span>Итого</span>
-                      <strong>{money(total, proposal.currency)}</strong>
+                      <strong>{total === null ? "Недостаточно данных для расчёта" : money(total, proposal.currency)}</strong>
                     </div>
                     {total !== null &&
                       proposal.documentTotal !== null &&
@@ -1027,11 +1030,18 @@ function App() {
                       )}
                   </div>
                 )}
+                {proposal.items.length === 0 && (
+                  <div className="items-data">
+                    <h3>Позиции</h3>
+                    <p className="validation-note">{missingValue("items")}</p>
+                  </div>
+                )}
                 {(proposal.additionalFields ?? []).map((field, index) => (
                   <DataField
                     key={`extra-${index}`}
                     label={field.label}
                     value={field.value}
+                    evidence={additionalEvidence(field)}
                   />
                 ))}
                 {proposal.notes && (
@@ -1044,7 +1054,7 @@ function App() {
                 <div className="validation-box">
                   <strong>
                     {canConfirm ?
-                      "Обязательные данные заполнены"
+                      "Данные готовы к проверке и сохранению"
                     : "Что нужно проверить"}
                   </strong>
                   {validation.length > 0 && (
@@ -1106,177 +1116,61 @@ function App() {
   );
 }
 
-function ModelSelector({
-  models,
-  selected,
-  mode,
-  onModeChange,
-  onToggle,
-}: {
-  models: ExtractionModel[];
-  selected: string[];
-  mode: "single" | "compare";
-  onModeChange: (mode: "single" | "compare") => void;
-  onToggle: (model: string) => void;
-}) {
+function OpenAIProvider({ model, error }: { model: ExtractionModel; error: string }) {
+  const configured = model.configured ?? model.installed;
   return (
     <section className="model-selector">
       <div className="model-selector-heading">
         <div>
           <span className="step-label">ШАГ 1</span>
-          <h2>Модель распознавания</h2>
+          <h2>Распознавание через ChatGPT</h2>
           <p>
-            Модель определяет поля и колонки и проверяет их по источнику.
-            Если модель недоступна, резервный разбор сопровождается
-            предупреждение.
+            ChatGPT читает текст, определяет смысл полей и строк таблиц.
+            Значения сверяются с источником. Если API недоступен, приложение
+            показывает ошибку и позволяет повторить чтение.
           </p>
         </div>
-        {models.length > 1 && (
-          <div
-            className="mode-switch"
-            role="group"
-            aria-label="Режим распознавания">
-            <button
-              type="button"
-              className={mode === "single" ? "active" : ""}
-              onClick={() => onModeChange("single")}>
-              Одна модель
-            </button>
-            <button
-              type="button"
-              className={mode === "compare" ? "active" : ""}
-              onClick={() => onModeChange("compare")}>
-              Сравнить модели
-            </button>
-          </div>
-        )}
       </div>
-      <div className="model-grid">
-        {models.map((model) => {
-          const checked = selected.includes(model.id);
-          return (
-            <button
-              type="button"
-              className={`model-card ${checked ? "selected" : ""}`}
-              onClick={() => onToggle(model.id)}
-              aria-pressed={checked}
-              key={model.id}>
-              <span className="model-check">{checked ? "✓" : ""}</span>
-              <span className="model-title">
-                {model.name}
-                {model.recommended && <small>Рекомендуемая</small>}
-              </span>
-              <span className="model-description">{model.description}</span>
-              <span className="model-meta">
-                {model.size}
-                {model.installed === true ?
-                  " · загружена"
-                : model.installed === false ?
-                  " · не загружена"
-                : ""}
-              </span>
-            </button>
-          );
-        })}
+      <div className={`model-card provider-card ${configured === false ? "unavailable" : "selected"}`}>
+        <span className="model-check">{configured === false ? "!" : "✓"}</span>
+        <span className="model-title">{model.name}</span>
+        <span className="model-description">{model.description}</span>
+        <span className="model-meta">
+          {model.size} · {configured === true ? "API настроен" : configured === false ? "API не настроен" : "Проверяем настройки API"}
+        </span>
       </div>
-      <p className="model-selection-note">
-        {mode === "compare" ?
-          `Выбрано ${selected.length} модели. Они запускаются по очереди, поэтому сравнение занимает больше времени.`
-        : "Будет использована одна серверная модель."}
-      </p>
-    </section>
-  );
-}
-
-function ModelComparison({
-  uploads,
-  currency,
-  onUse,
-}: {
-  uploads: Upload[];
-  currency: string;
-  onUse: (uploadIndex: number, run: ModelRun) => void;
-}) {
-  return (
-    <section className="model-comparison">
-      <h3>Сравнение моделей</h3>
-      <p>
-        Итог собран по совпадающим полям. Для позиций взят наиболее полный
-        результат; при необходимости выберите результат конкретной модели.
-      </p>
-      {uploads.map((upload, uploadIndex) => {
-        const runs = upload.metadata.modelRuns ?? [];
-        if (runs.length < 2) return null;
-        return (
-          <div
-            className="model-file"
-            key={`${upload.file.name}-${uploadIndex}`}>
-            <strong>{upload.file.name}</strong>
-            <div className="model-run-grid">
-              {runs.map((run) => {
-                const items = run.proposal?.items ?? [];
-                const runTotal = sumItems(items);
-                const fields =
-                  run.proposal ?
-                    textFields.filter(([key]) => Boolean(run.proposal?.[key]))
-                      .length
-                  : 0;
-                return (
-                  <article
-                    className={`model-run ${run.status}`}
-                    key={run.model}>
-                    <div>
-                      <b>{run.name}</b>
-                      <span>{(run.durationMs / 1000).toFixed(1)} сек.</span>
-                    </div>
-                    {run.status === "parsed" ?
-                      <>
-                        <p>
-                          {fields} полей · {items.length} позиций · уверенность{" "}
-                          {Math.round(run.confidence * 100)}%
-                        </p>
-                        <strong>
-                          {money(
-                            runTotal,
-                            currency || String(run.proposal?.currency ?? ""),
-                          )}
-                        </strong>
-                        <button
-                          type="button"
-                          className="text-button"
-                          onClick={() => onUse(uploadIndex, run)}>
-                          Использовать этот результат
-                        </button>
-                      </>
-                    : <p className="model-error">
-                        {run.error || "Нет результата"}
-                      </p>
-                    }
-                  </article>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })}
+      {error && <p className="model-selection-note" role="alert">{error}</p>}
+      {configured === false && (
+        <p className="model-selection-note" role="alert">
+          Укажите OPENAI_API_KEY в настройках сервера и перезапустите backend.
+          Чтение документов недоступно, пока API не настроен.
+        </p>
+      )}
     </section>
   );
 }
 
 function SourcePreview({ upload }: { upload: Upload }) {
+  const pdf = upload.file.type === "application/pdf" || /\.pdf$/i.test(upload.file.name);
+  const image = upload.file.type.startsWith("image/") || /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(upload.file.name);
+  const tiff = /\.tiff?$/i.test(upload.file.name);
   const previewable =
-    upload.file.type === "application/pdf" ||
-    upload.file.type.startsWith("image/");
-  const url = useMemo(
-    () => (previewable ? URL.createObjectURL(upload.file) : ""),
-    [previewable, upload.file],
-  );
-  useEffect(
-    () => () => {
-      if (url) URL.revokeObjectURL(url);
-    },
-    [url],
-  );
+    pdf || image;
+  const [preview, setPreview] = useState<{ file: File; url: string } | null>(null);
+  const url = preview?.file === upload.file ? preview.url : "";
+  useEffect(() => {
+    if (!previewable) return;
+    const nextUrl = URL.createObjectURL(upload.file);
+    let active = true;
+    // Ignore the cancelled setup when React checks effect cleanup in StrictMode.
+    queueMicrotask(() => {
+      if (active) setPreview({ file: upload.file, url: nextUrl });
+    });
+    return () => {
+      active = false;
+      URL.revokeObjectURL(nextUrl);
+    };
+  }, [previewable, upload.file]);
   return (
     <section className="source-preview">
       <div>
@@ -1287,22 +1181,23 @@ function SourcePreview({ upload }: { upload: Upload }) {
         </span>
       </div>
       {url &&
-        (upload.file.type === "application/pdf" ?
+        (pdf ?
           <iframe
             className="document-frame"
             title={`Просмотр ${upload.file.name}`}
             src={url}
           />
-        : <img
+        : !tiff && <img
             className="document-image"
             src={url}
             alt={`Предпросмотр ${upload.file.name}`}
           />)}
+      {tiff && <p className="validation-note">Предпросмотр TIFF доступен не во всех браузерах. Проверьте оригинал изображения и прочитанный текст.</p>}
       {upload.proposal.notes && <pre>{upload.proposal.notes}</pre>}
       {!upload.proposal.notes && !previewable && (
         <pre>
           {upload.error ||
-            "Текстовый слой недоступен; обработано с помощью OCR."}
+            "Текст документа недоступен. Проверьте предупреждения извлечения."}
         </pre>
       )}
       {upload.metadata.warnings.map((warning) => (
@@ -1339,7 +1234,7 @@ function ProposalEditor({
         {
           ...item,
           ...(key === "quantity" || key === "unitPrice" ?
-            { lineTotal: null, components: [] }
+            { lineTotal: null }
           : {}),
           [key]:
             key === "name" || key === "unit" ? value
@@ -1463,11 +1358,13 @@ function ProposalEditor({
 function DataField({
   label,
   value,
+  rawValue,
   multiline = false,
   evidence = [],
 }: {
   label: string;
   value: string;
+  rawValue?: string | number;
   multiline?: boolean;
   evidence?: FieldEvidence[];
 }) {
@@ -1475,6 +1372,12 @@ function DataField({
     <div className={`data-field ${multiline ? "multiline" : ""}`}>
       <span>{label}</span>
       <strong>{value}</strong>
+      {rawValue !== undefined && rawValue !== "" && evidence.length > 0 &&
+        !evidence.some((source) => String(source.value ?? "") === String(rawValue)) && (
+          <small className="evidence unverified">
+            Значение изменено вручную. Ниже приведены исходные цитаты для сверки.
+          </small>
+        )}
       {evidence.map((source, index) => (
         <small
           className={
@@ -1485,10 +1388,14 @@ function DataField({
           {source.page ? ` · стр. ${source.page}` : ""}
           {source.sheet ? ` · лист ${source.sheet}` : ""}
           {source.row ? ` · строка ${source.row}, ячейка ${source.cell}` : ""}
-          {source.method ? ` · ${source.method}` : ""}
+          {(source.sourceMethod || source.source_method || source.method) ? ` · ${sourceMethodLabel(source.sourceMethod || source.source_method || source.method)}` : ""}
+          {source.method?.endsWith("+model") && (source.sourceMethod || source.source_method) ? " · смысл определён моделью" : ""}
+          {source.sourceId ? ` · источник ${source.sourceId}` : ""}
+          {source.bbox ? ` · область [${source.bbox.map((coordinate) => Math.round(coordinate)).join(", ")}]` : ""}
           {source.confidence !== undefined ?
-            ` · ${Math.round(source.confidence * 100)}%`
+            ` · оценка надёжности ${Math.round(source.confidence * 100)}%`
           : ""}
+          {source.visionAgreement === false || source.vision_agreement === false ? " · визуальный текст отличается" : ""}
           : «{source.excerpt}»{source.warning ? ` · ${source.warning}` : ""}
           {source.verifiedInSource ? "" : " · точное совпадение не найдено"}
         </small>

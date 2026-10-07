@@ -1,11 +1,11 @@
-export type SourceCell = {
-  id: string; file: string; text: string; block: string; row: number; cell: number;
-  page?: number | null; sheet?: string | null; kind?: "text" | "table"; method: string;
-};
+import type { DocumentRouting, SourceCell } from "./documentParser";
+export type { SourceCell } from "./documentParser";
 export type MarkedField = { field: string; state: "pending" | "found" | "missing"; cell: string; value: string };
 export type MarkedTable = {
   block: string; reviewed: boolean; isItems: boolean; firstRow: number; lastRow: number;
   nameColumn: number; quantityColumn: number; unitColumn: number;
+  componentMode?: "additive" | "alternative";
+  unitPriceColumn?: number; lineTotalColumn?: number;
   components: { label: string; labelCell: string; priceColumn: number; totalColumn: number }[];
   extras: { label: string; labelCell: string; column: number }[];
 };
@@ -15,6 +15,7 @@ export type AnnotationSummary = {
 };
 export type AnnotationDocument = AnnotationSummary & {
   cells: SourceCell[]; annotation: Annotation; warnings: string[]; parseError: string;
+  routing?: DocumentRouting;
   preview: { kind: "pdf" | "image" | "word" | "text" | "table"; pages?: number; text?: string };
   duplicate?: boolean;
   automation?: { status?: string; humanReviewed?: boolean; split?: string; reasons?: string[]; quarantined?: boolean; quarantineReasons?: string[] };

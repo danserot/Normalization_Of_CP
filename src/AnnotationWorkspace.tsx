@@ -14,6 +14,17 @@ import type {
   SourceCell,
 } from "./lib/annotationApi";
 import "./AnnotationWorkspace.css";
+import { sourceMethodLabel } from "./lib/sourceEvidence";
+import { extractionFileAccept } from "./lib/extractionApi";
+
+const sourceCellDescription = (cell: SourceCell): string =>
+  [
+    cell.id,
+    sourceMethodLabel(cell.source_method || cell.method),
+    cell.page ? `стр. ${cell.page}` : "",
+    cell.bbox ? `область [${cell.bbox.map((value) => Math.round(value)).join(", ")}]` : "",
+    cell.vision_agreement === false ? "визуальный текст отличается" : "",
+  ].filter(Boolean).join(" · ");
 
 const labels: Record<string, string> = {
   title: "Название КП",
@@ -32,8 +43,6 @@ const labels: Record<string, string> = {
   documentDate: "Дата документа",
   documentTotal: "Общий итог",
 };
-const formats =
-  ".pdf,.docx,.xlsx,.xls,.csv,.tsv,.txt,.json,.png,.jpg,.jpeg,.webp";
 const message = (cause: unknown) =>
   cause instanceof Error ? cause.message : "Не удалось выполнить действие";
 const fieldOrder = [
@@ -351,7 +360,7 @@ export default function AnnotationWorkspace({
     try {
       await exportAnnotations();
       setNotice(
-        "Датасет выгружен. Проверьте количество примеров в train/val/test перед обучением.",
+        "Проверенные документы и разметка выгружены в архив.",
       );
     } catch (cause) {
       setError(message(cause));
@@ -385,7 +394,7 @@ export default function AnnotationWorkspace({
     <main className="annotation-app">
       <header className="annotation-header">
         <div>
-          <span className="eyebrow">READ DOCUMENT · ОБУЧЕНИЕ</span>
+          <span className="eyebrow">READ DOCUMENT · ПРОВЕРКА</span>
           <h1>Разметка коммерческих предложений</h1>
           <p>Заполните форму слева, сверяя ответы с документом справа.</p>
         </div>
@@ -402,7 +411,7 @@ export default function AnnotationWorkspace({
             className="outline-cta"
             disabled={busy || reviewedCount === 0}
             onClick={() => void download()}>
-            Экспорт датасета · {reviewedCount}
+            Экспорт разметки · {reviewedCount}
           </button>
           <button
             className="primary-cta"
@@ -415,7 +424,7 @@ export default function AnnotationWorkspace({
             hidden
             type="file"
             multiple
-            accept={formats}
+            accept={extractionFileAccept}
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
               event.target.value = "";
@@ -479,7 +488,7 @@ export default function AnnotationWorkspace({
               <li>На последнем шаге сохраните проверенный результат.</li>
             </ol>
             <p>
-              Ошибки OCR сначала исправьте в исходном документе и загрузите его
+              Ошибки чтения сначала исправьте в исходном документе и загрузите его
               заново. Не размечайте выдуманные значения.
             </p>
           </details>
@@ -503,11 +512,11 @@ export default function AnnotationWorkspace({
           )}
           {!doc && !busy && (
             <div className="annotation-empty">
-              <span>01 / ПОДГОТОВКА ДАТАСЕТА</span>
+              <span>01 / ПРОВЕРКА ИСТОЧНИКОВ</span>
               <h2>Каждый КП — один проверенный документ</h2>
               <p>
                 Добавьте файлы или откройте сохранённый черновик. Вы отмечаете
-                правильные ответы, приложение формирует JSON для обучения.
+                правильные ответы и связываете их с исходными ячейками документа.
               </p>
               <button
                 className="primary-cta"
@@ -515,8 +524,7 @@ export default function AnnotationWorkspace({
                 Выбрать КП
               </button>
               <p className="annotation-hint">
-                PDF · DOCX · XLSX · XLS · CSV · TSV · TXT · JSON · PNG · JPG ·
-                WEBP
+                PDF · DOCX · таблицы · текст · PNG · JPG · WEBP · BMP · TIFF
                 <br />
                 До 25 МБ на файл · до 50 файлов за загрузку
               </p>
@@ -553,7 +561,7 @@ export default function AnnotationWorkspace({
               )}
               {doc.automation?.quarantined && (
                 <div className="validation-box" role="status">
-                  Карантин: документ исключён из обучения. Не удалось надёжно извлечь или проверить часть данных.
+                  Документ требует проверки. Не удалось надёжно извлечь или подтвердить часть данных.
                 </div>
               )}
               {doc.automation && !doc.automation.quarantined && doc.status !== "reviewed" && (
@@ -632,7 +640,7 @@ export default function AnnotationWorkspace({
                                     {field.state === "found" ?
                                       "Указано"
                                     : field.state === "missing" ?
-                                      "Не указано"
+                                      "Не указано в КП"
                                     : "Не проверено"}
                                   </span>
                                 </div>
@@ -723,7 +731,7 @@ export default function AnnotationWorkspace({
                                   {field.state === "found" ?
                                     field.value
                                   : field.state === "missing" ?
-                                    "Не указано"
+                                    "Не указано в КП"
                                   : "Нужно проверить"}
                                 </small>
                               </button>
@@ -867,8 +875,8 @@ export default function AnnotationWorkspace({
                         </label>
                         <p className="annotation-hint">
                           Для похожих КП и копий в разных форматах задайте
-                          одинаковую группу. Она целиком попадёт в train, val
-                          или test.
+                          одинаковую группу, чтобы сохранять связь между
+                          версиями при экспорте и проверке качества.
                         </p>
                         <label className="annotation-label">
                           Замечания для себя
@@ -894,6 +902,12 @@ export default function AnnotationWorkspace({
                               ))}
                             </ul>
                           </details>
+                        )}
+                        {doc.routing && (
+                          <p className="annotation-hint">
+                            Структура: {doc.routing.used ? "визуальное чтение через OpenAI API" : "исходные ячейки и текст файла"}
+                            {doc.routing.mandatory && !doc.routing.used ? "; визуальная проверка не завершена" : ""}.
+                          </p>
                         )}
                       </section>
                     )}
@@ -1184,6 +1198,31 @@ function TableEditor({
             />
           </div>
           <h4>Составляющие стоимости</h4>
+          <div className="annotation-grid-two">
+            <ColumnSelect
+              label="Общая цена за единицу (если есть отдельная колонка)"
+              value={table.unitPriceColumn ?? 0}
+              width={width}
+              names={names}
+              onChange={(value) => change({ unitPriceColumn: value })}
+            />
+            <ColumnSelect
+              label="Общая сумма строки (если есть отдельная колонка)"
+              value={table.lineTotalColumn ?? 0}
+              width={width}
+              names={names}
+              onChange={(value) => change({ lineTotalColumn: value })}
+            />
+          </div>
+          <label className="annotation-label">
+            Как связаны стоимости?
+            <select
+              value={table.componentMode ?? "additive"}
+              onChange={(event) => change({ componentMode: event.target.value as "additive" | "alternative" })}>
+              <option value="additive">Части одной цены: оборудование, монтаж, доставка</option>
+              <option value="alternative">Альтернативные варианты — не складывать</option>
+            </select>
+          </label>
           {table.components.map((component, index) => (
             <div className="annotation-cost-editor" key={index}>
               <label className="annotation-label">
@@ -1350,7 +1389,7 @@ function DocumentPreview({
     return (
       <>
         <p className="annotation-preview-caption">
-          DOCX: текст, таблицы и встроенные изображения. Разбивка страниц и
+          DOCX: текст и таблицы. Разбивка страниц и
           оформление могут отличаться от Word.
         </p>
         <iframe
@@ -1624,11 +1663,11 @@ function SourceBrowser({
                               <span>{cell.text}</span>
                             : <button
                                 disabled={disabled || !cell.text}
-                                title={`${cell.id} · ${cell.method}`}
+                                title={sourceCellDescription(cell)}
                                 onClick={() => onChoose(cell)}>
                                 <small>
                                   {cell.id}
-                                  {cell.method === "ocr" ? " · OCR" : ""}
+                                  {cell.source_method?.includes("vision") || cell.method === "paddleocr-vl" ? " · визуально" : ""}
                                 </small>
                                 {cell.text || "—"}
                               </button>)}
@@ -1654,10 +1693,10 @@ function SourceBrowser({
                         key={cell.id}
                         disabled={disabled || !cell.text}
                         className={cell.id === selected ? "selected" : ""}
-                        title={`${cell.id} · ${cell.method}`}
+                        title={sourceCellDescription(cell)}
                         onClick={() => onChoose(cell)}>
                         <small>
-                          {cell.id}{cell.method === "ocr" ? " · OCR" : ""}
+                          {cell.id}{cell.source_method?.includes("vision") || cell.method === "paddleocr-vl" ? " · визуально" : ""}
                         </small>
                         {cell.text || "—"}
                       </button>,

@@ -8,9 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import main
-from backend.annotation_data import Annotation, prepare_annotation, training_examples, validate_annotation
-from backend.extraction import Source
-from backend.universal import Layout, Requisites, metadata_cells
+from backend.annotation_data import Annotation, MarkedTable, plan_training_examples, prepare_annotation, source_from_payload, training_examples, validate_annotation
+from backend.extraction import DocumentError, Source
+from backend.rules import FIELDS
+from backend.universal import Layout, PLAN_SYSTEM, Plan, Requisites, metadata_cells
 from backend.universal import catalog
 from backend.annotation_data import word_preview
 
@@ -100,6 +101,16 @@ def test_export_only_reviewed_documents_with_groups_and_production_schemas(clien
                 assert json.loads(example['instruction'])
                 assert example['system']
         assert 'kp_test' in json.loads(archive.read('dataset_info.json'))
+        assert sum(manifest['planCounts'].values()) == 2
+        assert manifest['schemaVersion'] == 'semantic-plan-v1'
+        for split in ('train', 'val', 'test'):
+            for example in json.loads(archive.read(f'kp_plan_{split}.json')):
+                answer = Plan.model_validate_json(example['output'])
+                assert answer.fields
+                assert 'items' not in json.loads(example['output'])
+                assert 'metadataBlocks' in json.loads(example['instruction'])
+                assert example['system']
+        assert 'kp_plan_test' in json.loads(archive.read('dataset_info.json'))
 
 
 def test_quarantined_upload_stays_excluded_even_after_human_review(client):
@@ -121,15 +132,15 @@ def test_quarantined_upload_stays_excluded_even_after_human_review(client):
 
 
 @pytest.mark.parametrize('filename,kind', [
-    ('offer.pdf', 'pdf'), ('offer-scan.pdf', 'pdf'), ('offer.docx', 'word'),
+    ('offer.pdf', 'pdf'), ('offer.docx', 'word'),
     ('offer.xlsx', 'table'), ('offer.xls', 'table'), ('offer.csv', 'table'), ('offer.tsv', 'table'),
-    ('offer.txt', 'text'), ('offer.json', 'text'), ('offer.png', 'image'), ('offer.jpg', 'image'), ('offer.webp', 'image'),
+    ('offer.txt', 'text'), ('offer.json', 'text'),
 ])
 def test_all_supported_format_previews(client, filename, kind):
     document = upload(client, filename)
     assert document['preview']['kind'] == kind
     assert document['cells'], document['warnings']
-    if kind in ('pdf', 'image'):
+    if kind == 'pdf':
         preview = client.get(f"/api/annotations/{document['id']}/pages/1")
         assert preview.status_code == 200
         assert preview.headers['content-type'].startswith('image/')
@@ -187,7 +198,7 @@ def test_late_table_header_is_visible_to_model_and_training():
     assert 26 in {row['row'] for row in catalog(source)[0]['rows']}
 
 
-def test_word_preview_preserves_images_hyperlink_text_nested_tables_and_escapes_markup():
+def test_word_preview_ignores_images_and_preserves_safe_text_and_tables():
     from docx import Document
     from docx.oxml import OxmlElement
     from PIL import Image
@@ -210,4 +221,46 @@ def test_word_preview_preserves_images_hyperlink_text_nested_tables_and_escapes_
     html = word_preview(output.getvalue())
     assert '<script>' not in html and '&lt;script&gt;' in html
     assert 'Текст ссылки' in html and 'Вложенная таблица' in html
-    assert 'data:image/jpeg;base64,' in html
+    assert 'data:image/' not in html
+
+
+def test_canonical_annotation_snapshot_preserves_provenance_and_old_cells():
+    payload = {'cells': [{'id': 'c0', 'file': 'offer.pdf', 'text': '100',
+        'block': 'table-1', 'row': 2, 'cell': 3, 'page': 1, 'kind': 'table',
+        'method': 'native', 'bbox': [10, 20, 30, 40], 'sourceMethod': 'pdf-native+vision',
+        'visionAgreement': True, 'rowSpan': 2, 'columnSpan': 1}],
+        'routing': {'used': True, 'processed_pages': [1]}}
+    source = source_from_payload(payload, 'offer.pdf')
+    cell = source.cells[0]
+    assert cell.bbox == [10, 20, 30, 40]
+    assert cell.source_method == 'pdf-native+vision'
+    assert cell.vision_agreement is True and cell.rowspan == 2
+    assert source.routing['used']
+    legacy = source_from_payload({'cells': [{'id': 'c0', 'file': 'old.txt', 'text': 'Legacy',
+        'block': 'text', 'row': 1, 'cell': 1}]}, 'old.txt')
+    assert legacy.cells[0].text == 'Legacy'
+
+
+def test_plan_training_keeps_500_item_rows_out_of_model_output(monkeypatch):
+    source = Source('large.xlsx')
+    for column, text in enumerate(['Наименование', 'Количество', 'Цена', 'Сумма'], 1):
+        source.add(text, 'table', 1, column, kind='table')
+    for row in range(2, 502):
+        for column, text in enumerate([f'Услуга {row}', '2', '100', '200'], 1):
+            source.add(text, 'table', row, column, kind='table')
+    annotation = Annotation(fields=[{'field': key, 'state': 'missing'} for key in FIELDS],
+                            tables=[], group='large')
+    # Explicitly reviewed column mapping is the complete target, regardless of row count.
+    annotation.tables = [MarkedTable(
+        block='table', reviewed=True, isItems=True, firstRow=2, lastRow=501,
+        nameColumn=1, quantityColumn=2, unitColumn=0,
+        components=[{'label': 'Цена', 'labelCell': 'c2', 'priceColumn': 3, 'totalColumn': 4}], extras=[])]
+    example = plan_training_examples(annotation, {'cells': source.public()}, source.file)[0]
+    plan = Plan.model_validate_json(example['output'])
+    assert example['system'] == PLAN_SYSTEM
+    assert len(plan.tables) == 1 and plan.tables[0].lastRow == 501
+    assert 'Услуга' not in example['output']
+    assert len(example['instruction']) < 15_000
+    monkeypatch.setenv('SEMANTIC_CONTEXT_CHARS', '10')
+    with pytest.raises(DocumentError, match='semantic context'):
+        plan_training_examples(annotation, {'cells': source.public()}, source.file)

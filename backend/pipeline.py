@@ -29,8 +29,21 @@ def process_document(content, filename):
     read_ms = round((time.perf_counter() - started) * 1000)
     model_started = time.perf_counter()
     result, verification = extract_universal(source, content, filename)
+    routing = getattr(source, 'routing', {})
+    verification['visionUsed'] = routing.get('used', False)
+    verification['visionRequired'] = routing.get('mandatory', False)
+    verification['visionStatus'] = routing.get('status', 'native')
+    verification['visionComplete'] = (routing.get('available', False)
+                                      and routing.get('status') == 'vision'
+                                      and not routing.get('issues'))
+    if routing.get('embeddedImagesReviewRequired'):
+        verification.update(embeddedImagesReviewRequired=True, coverageComplete=False)
+    if routing.get('mandatory') and (not routing.get('available') or routing.get('status') != 'vision'
+                                    or routing.get('issues')):
+        verification.update(coverageComplete=False, reviewCompleted=False)
     model_ms = round((time.perf_counter() - model_started) * 1000)
-    model_used = result is not None
+    llm_calls = verification.get('llmCalls', 0)
+    model_used = llm_calls > 0
     if result is not None:
         proposal, proof, warnings, used_rows = result
     else:
@@ -42,29 +55,38 @@ def process_document(content, filename):
     validate(proposal, proof, warnings)
     validation_ms = round((time.perf_counter() - validation_started) * 1000)
     outcome = extraction_outcome(proposal, verification)
-    low_ocr_pages = [page for page in source.ocr_quality
-                     if page['meanConfidence'] is None or page['meanConfidence'] < 55]
-    if low_ocr_pages:
-        outcome['ocrReviewPages'] = [page['page'] for page in low_ocr_pages]
-        if outcome['state'] == 'complete':
-            outcome['state'] = 'partial'
-            outcome['message'] = 'OCR распознал текст неуверенно. Сверьте скан и значения.'
-        elif outcome['state'] == 'partial':
-            outcome['message'] = 'Данные извлечены частично; также проверьте страницы с низкой оценкой OCR.'
     if outcome['state'] != 'complete':
         warnings.insert(0, outcome['message'])
+    total_ms = round((time.perf_counter() - started) * 1000)
+    stage_timings = routing.get('timingsMs', {})
+    logging.getLogger(__name__).info(
+        'extraction_complete format=%s bytes=%d blocks=%d tables=%d cells=%d llm_calls=%d llm_ms=%d total_ms=%d warnings=%d fallback=%s',
+        Path(filename).suffix.lower(), len(content), len({cell.block for cell in source.cells}),
+        source.tables, len(source.cells), llm_calls, model_ms if model_used else 0, total_ms,
+        len(warnings), verification.get('mode'))
     return {'proposal': proposal, 'metadata': {
         'sourceName': filename,
-        'parser': 'Локальная модель + проверка источников' if model_used else 'Локальная модель: извлечение не выполнено',
+        'parser': ('OpenAI Vision' if routing.get('used') else 'Исходные ячейки документа')
+                  + (' + OpenAI: структура КП' if model_used else '') + ' + проверка источников',
         'status': 'empty' if outcome['state'] == 'unavailable' else 'parsed',
         'outcome': outcome,
-        'ocrQuality': source.ocr_quality,
-        'timingsMs': {'read': read_ms, 'model': model_ms, 'validation': validation_ms,
-                      'total': round((time.perf_counter() - started) * 1000)},
+        'timingsMs': {'read': read_ms, 'parsing': stage_timings.get('native', read_ms), 'normalization': 0,
+                      'render': stage_timings.get('render', 0), 'vision': stage_timings.get('vision', 0),
+                      'fusion': stage_timings.get('fusion', 0),
+                      'semantic': model_ms if not model_used else 0, 'model': model_ms,
+                      'llm': model_ms if model_used else 0, 'validation': validation_ms,
+                      'total': total_ms},
         'confidence': round(min((e['confidence'] for e in proof.values() if isinstance(e, dict)), default=0), 2),
+        'confidenceMethod': 'heuristic-source-structure-arithmetic',
         'warnings': list(dict.fromkeys(warnings)), 'fieldEvidence': proof,
-        'ocrPages': len(source.ocr_pages), 'ocrPageNumbers': source.ocr_pages,
-        'sourceCells': source.public(), 'modelUsed': model_used, 'verification': verification,
+        'sourceCells': source.public(), 'modelUsed': model_used, 'llmCalls': llm_calls,
+        'architectureVersion': 3, 'provider': 'openai', 'routing': routing,
+        'canonicalDocument': source.structure() if hasattr(source, 'structure') else {},
+        'documentStats': {'bytes': len(content), 'format': Path(filename).suffix.lower(),
+                          'blocks': len({cell.block for cell in source.cells}),
+                          'tables': source.tables, 'cells': len(source.cells), 'pages': source.pages,
+                          'nativeWords': len(getattr(source, 'native_words', []))},
+        'verification': verification,
     }}
 
 
@@ -111,7 +133,18 @@ class Pipeline:
     @staticmethod
     def _cache_key(content, filename, mode):
         digest = hashlib.sha256(content).hexdigest()
-        return f'{mode}:{filename.casefold()}:{digest}'
+        config = {name: os.getenv(name, '') for name in (
+            'LOCAL_MODEL_ENABLED', 'LOCAL_MODEL_NAME', 'LOCAL_MODEL_ID', 'LOCAL_MODEL_URL',
+            'SEMANTIC_MODEL_MODE', 'SEMANTIC_MODE', 'SEMANTIC_MODEL_URL', 'SEMANTIC_MODEL_ID',
+            'SEMANTIC_MODEL_NAME', 'SEMANTIC_MODEL_ENABLED', 'SEMANTIC_CONTEXT_CHARS',
+            'VISION_ENABLED', 'VISION_SERVICE_URL', 'VISION_RENDER_DPI',
+            'VISION_MAX_SIDE', 'VISION_MAX_PAGES', 'VISION_PDF_MODE',
+            'OPENAI_MODEL', 'OPENAI_VISION_MODEL', 'OPENAI_API_URL',
+            'OPENAI_REASONING_EFFORT', 'OPENAI_VISION_MAX_OUTPUT_TOKENS',
+            'SEMANTIC_MAX_OUTPUT_TOKENS')}
+        config['keyFingerprint'] = hashlib.sha256(os.getenv('OPENAI_API_KEY', '').encode()).hexdigest()
+        signature = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
+        return f'v3:{mode}:{filename}:{signature}:{digest}'
 
     def _cache_get(self, key):
         entry = self._cache.get(key)
@@ -135,6 +168,17 @@ class Pipeline:
         while self._cache and (len(self._cache) > self._cache_entries or self._cache_bytes > self._cache_limit):
             _, (size, _) = self._cache.popitem(last=False)
             self._cache_bytes -= size
+
+    @staticmethod
+    def _cacheable(result):
+        metadata = result.get('metadata', {})
+        verification = metadata.get('verification', {})
+        # Legitimately absent requisites are not a reason to repeat inference.
+        # Never retain unavailable/unfinished model or mandatory visual review.
+        return (metadata.get('outcome', {}).get('state') != 'unavailable'
+                and verification.get('coverageComplete') is True
+                and verification.get('reviewCompleted') is True
+                and (not verification.get('visionRequired') or verification.get('visionComplete') is True))
 
     def stop(self):
         if self.process:
@@ -180,19 +224,32 @@ class Pipeline:
                 self.process.start()
                 child.close()
             started = time.monotonic()
-            await asyncio.to_thread(self.connection.send, (content, filename, mode))
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.connection.send, (content, filename, mode)),
+                                       timeout=max(.01, DEADLINE - (time.monotonic() - started)))
+            except asyncio.TimeoutError as error:
+                self.stop()
+                raise DocumentError('Обработка остановлена: превышено время передачи документа') from error
             while not self.connection.poll():
                 if time.monotonic() - started > DEADLINE or not self.process.is_alive():
                     self.stop()
                     raise DocumentError(f'Обработка остановлена: превышено {DEADLINE} секунд или завершился рабочий процесс')
                 await asyncio.sleep(.05)
-            status, result = await asyncio.to_thread(self.connection.recv)
+            try:
+                status, result = await asyncio.wait_for(asyncio.to_thread(self.connection.recv),
+                    timeout=max(.01, DEADLINE - (time.monotonic() - started)))
+            except asyncio.TimeoutError as error:
+                self.stop()
+                raise DocumentError('Обработка остановлена: превышено время получения результата') from error
             if status != 'ok':
                 raise DocumentError(result)
-            if mode == 'extract' and result.get('metadata', {}).get('outcome', {}).get('state') == 'complete':
+            if mode == 'extract' and self._cacheable(result):
                 self._cache_put(key, result)
             result.setdefault('metadata', {})['cacheHit'] = False
             return result
+        except (EOFError, OSError) as error:
+            self.stop()
+            raise DocumentError('Рабочий процесс завершился до окончания обработки; повторите запрос') from error
         except asyncio.CancelledError:
             if owns_worker:
                 self.stop()
@@ -202,4 +259,80 @@ class Pipeline:
             if owns_worker:
                 self.busy = False
                 self._lock.release()
+            self.pending -= 1
+
+
+class PipelinePool(Pipeline):
+    """Bounded reusable processes, shared result cache and duplicate coalescing.
+
+    A process is owned by one job at a time. Killing a timed-out document cannot
+    interrupt another upload. The shared cache never contains unfinished reviews.
+    """
+    def __init__(self):
+        super().__init__()
+        count = min(8, max(1, int(os.getenv('EXTRACTION_WORKERS', '3'))))
+        self.workers = [Pipeline() for _ in range(count)]
+        self.max_pending = max(count, int(os.getenv('EXTRACTION_QUEUE_LIMIT', '8')))
+        self.active = 0
+        self._jobs = {}
+        self._queue = None
+        self._event_loop = None
+
+    def _available_workers(self):
+        loop = asyncio.get_running_loop()
+        if self._event_loop is not loop:
+            if self.pending:
+                raise RuntimeError('Worker pool is running in another event loop')
+            self._event_loop = loop
+            self._queue = asyncio.Queue()
+            for worker_instance in self.workers:
+                self._queue.put_nowait(worker_instance)
+        return self._queue
+
+    def stop(self):
+        for worker_instance in self.workers:
+            worker_instance.stop()
+
+    async def run(self, content, filename, mode='extract'):
+        key = self._cache_key(content, filename, mode)
+        cached = self._cache_get(key)
+        if cached is not None:
+            cached.setdefault('metadata', {})['cacheHit'] = True
+            return cached
+        job = self._jobs.get(key)
+        if job is None:
+            if self.pending >= self.max_pending:
+                raise QueueFullError('Очередь обработки заполнена. Подождите и повторите запрос.')
+            queue = self._available_workers()
+            self.pending += 1
+            job = asyncio.create_task(self._run_job(queue, key, content, filename, mode))
+            self._jobs[key] = job
+            def completed(task):
+                self._jobs.pop(key, None)
+                if not task.cancelled():
+                    task.exception()
+            job.add_done_callback(completed)
+        return copy.deepcopy(await asyncio.shield(job))
+
+    async def _run_job(self, queue, key, content, filename, mode):
+        worker_instance = None
+        started = time.monotonic()
+        try:
+            try:
+                worker_instance = await asyncio.wait_for(queue.get(), self.queue_wait_seconds)
+            except asyncio.TimeoutError as error:
+                raise QueueFullError('Документ слишком долго ожидал обработки. Повторите запрос.') from error
+            self.active += 1
+            self.busy = True
+            waited_ms = round((time.monotonic() - started) * 1000)
+            result = await worker_instance.run(content, filename, mode)
+            result.setdefault('metadata', {})['queueWaitMs'] = waited_ms
+            if mode == 'extract' and self._cacheable(result):
+                self._cache_put(key, result)
+            return result
+        finally:
+            if worker_instance is not None:
+                self.active -= 1
+                self.busy = self.active > 0
+                queue.put_nowait(worker_instance)
             self.pending -= 1

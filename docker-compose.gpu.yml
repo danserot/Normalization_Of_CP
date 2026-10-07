@@ -1,10 +1,4 @@
-# Optional GPU inference overlay. Requires Docker GPU passthrough and a CUDA-enabled llama.cpp image.
-# Start with: docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile model up -d
-services:
-  backend:
-    environment:
-      LOCAL_MODEL_DEVICE: cuda
-  model:
-    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
-    gpus: all
-    command: ["-m", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--alias", "local", "--host", "0.0.0.0", "--port", "8081", "-c", "4096", "-np", "1", "-t", "4", "-ngl", "99", "-b", "128", "-ub", "128", "--log-disable", "--no-webui"]
+# Archived compatibility overlay: active inference uses OpenAI API only.
+# Old -f docker-compose.gpu.yml commands remain harmless: no GPU, Paddle or
+# local model service starts. Use docker-compose.yml directly.
+services: {}

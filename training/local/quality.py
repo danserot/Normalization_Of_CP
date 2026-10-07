@@ -41,7 +41,9 @@ def check_annotation(payload, annotation):
         reasons.add('E_GROUNDING')
     if payload.get('parseError') or not source.cells:
         reasons.add('E_PARSE')
-    if payload.get('incomplete') or any(c.method == 'ocr' for c in source.cells):
+    if payload.get('incomplete') or any(c.method in {'ocr', 'paddleocr-vl'}
+            or (getattr(c, 'source_method', '').startswith('vision'))
+            or getattr(c, 'vision_agreement', None) is False for c in source.cells):
         reasons.add('E_OCR')
     text = source.text()
     if text.count('\ufffd') or sum(ord(c) < 32 and not c.isspace() for c in text):
@@ -77,7 +79,7 @@ def check_annotation(payload, annotation):
                 continue
             item_rows += 1
             quantity = numeric_quote(cells[table.quantityColumn].text) if table.quantityColumn in cells else None
-            if table.quantityColumn and (quantity is None or quantity <= 0):
+            if table.quantityColumn and (quantity is None or quantity < 0):
                 reasons.add('E_ROWS')
             for component in table.components:
                 price = numeric_quote(cells[component.priceColumn].text) if component.priceColumn in cells else None

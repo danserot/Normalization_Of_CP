@@ -12,9 +12,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import fitz
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
-from PIL import Image, ImageOps
 
-from .annotation_data import Annotation, SaveAnnotation, group_split, training_examples, validate_annotation
+from .annotation_data import Annotation, SaveAnnotation, group_split, plan_training_examples, training_examples, validate_annotation
 from .extraction import FORMATS, MAX_BYTES, DocumentError
 from .pipeline import QueueFullError
 
@@ -99,9 +98,12 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                        for row in connection.execute("SELECT payload FROM annotations WHERE status='reviewed'")):
                 raise HTTPException(422, 'Сначала сохраните хотя бы один проверенный документ')
             counts = {'train': 0, 'val': 0, 'test': 0}
+            plan_counts = {split: 0 for split in counts}
             manifest, buffer = [], BytesIO()
             info = {f'kp_{split}': {'file_name': f'kp_{split}.json', 'columns':
                 {'prompt': 'instruction', 'query': 'input', 'response': 'output', 'system': 'system'}} for split in counts}
+            info.update({f'kp_plan_{split}': {'file_name': f'kp_plan_{split}.json', 'columns':
+                {'prompt': 'instruction', 'query': 'input', 'response': 'output', 'system': 'system'}} for split in counts})
             with ZipFile(buffer, 'w', ZIP_DEFLATED) as archive:
                 for split in counts:
                     with archive.open(f'kp_{split}.json', 'w') as output:
@@ -122,10 +124,28 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                                 output.write(((',' if counts[split] else '') + '\n' + json.dumps(sample, ensure_ascii=False)).encode())
                                 counts[split] += 1
                         output.write(b'\n]')
+                documents = {document['id']: document for document in manifest}
+                for split in plan_counts:
+                    with archive.open(f'kp_plan_{split}.json', 'w') as output:
+                        output.write(b'[')
+                        for row in connection.execute("SELECT id,filename,annotation,payload FROM annotations WHERE status='reviewed' ORDER BY id"):
+                            if row['id'] not in documents or documents[row['id']]['split'] != split:
+                                continue
+                            annotation = Annotation.model_validate_json(row['annotation'])
+                            try:
+                                samples = plan_training_examples(annotation, json.loads(row['payload']), row['filename'])
+                            except DocumentError as error:
+                                raise HTTPException(422, f"{row['filename']}: не удалось сформировать план обучения: {error}") from error
+                            documents[row['id']].update(planExampleStart=plan_counts[split], planExampleCount=len(samples))
+                            for sample in samples:
+                                output.write(((',' if plan_counts[split] else '') + '\n' + json.dumps(sample, ensure_ascii=False)).encode())
+                                plan_counts[split] += 1
+                        output.write(b'\n]')
                 archive.writestr('dataset_info.json', json.dumps(info, ensure_ascii=False, indent=2))
-                archive.writestr('manifest.json', json.dumps({'formatVersion': 1, 'task': 'Layout + Requisites',
-                    'counts': counts, 'documents': manifest}, ensure_ascii=False, indent=2))
-                archive.writestr('README.txt', 'Only human-reviewed annotations. Groups stay in one split. Small collections may have empty splits. Inspect counts before training. Inputs use parsed source cells; OCR is not corrected by this dataset. Longer examples must be checked against training cutoff_len. Human notes/issues are audit data, not trained answers. Originals remain in the application database.')
+                archive.writestr('manifest.json', json.dumps({'formatVersion': 2, 'task': 'Layout + Requisites (legacy)',
+                    'productionTask': 'Semantic extraction Plan', 'schemaVersion': 'semantic-plan-v1',
+                    'counts': counts, 'planCounts': plan_counts, 'documents': manifest}, ensure_ascii=False, indent=2))
+                archive.writestr('README.txt', 'Only human-reviewed annotations. Groups stay in one split. kp_plan_* use the production semantic Plan prompt and compact structured document input; plans contain mappings and sourced fields, never generated item rows. kp_* preserve legacy Layout/Requisites compatibility. Small collections may have empty splits. Inspect counts and planCounts before training. Source cells and visual/native provenance are retained in the application database; vision recognition is not trained by this text dataset. Longer examples must be checked against training cutoff_len. Human notes/issues are audit data, not trained answers. Originals remain in the application database.')
         return Response(buffer.getvalue(), media_type='application/zip', headers={
             'Content-Disposition': 'attachment; filename="kp-dataset.zip"', 'Cache-Control': 'no-store'})
 
@@ -174,13 +194,6 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                 scale = min(2, 1800 / max(p.rect.width, p.rect.height, 1))
                 pixmap = p.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                 return pixmap.tobytes('png'), 'image/png'
-        if preview['kind'] == 'image' and page == 1:
-            with Image.open(BytesIO(row['original'])) as original_image:
-                image = ImageOps.exif_transpose(original_image)
-                image.thumbnail((2400, 2400))
-                output = BytesIO()
-                image.convert('RGB').save(output, format='JPEG', quality=90)
-            return output.getvalue(), 'image/jpeg'
         raise HTTPException(404, 'Визуальная страница не найдена')
 
     @router.get('/{identifier}/pages/{page}')
