@@ -90,6 +90,63 @@ def test_multiframe_tiff_preserves_all_pages(monkeypatch):
     assert [cell.text for cell in source.cells] == ['Page 1', 'Page 2']
 
 
+def test_pdf_numeric_transcription_conflict_requires_review(monkeypatch):
+    import fitz
+    from backend.extraction import read_document
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-key')
+    monkeypatch.setenv('VISION_PDF_MODE', 'always')
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((30, 30), 'Commercial proposal document total 1000')
+        content = pdf.tobytes()
+
+    class Provider:
+        def generate(self, *args, **options):
+            return json.dumps({'page': 1, 'complete': True, 'blank': False, 'warnings': [],
+                'blocks': [{'type': 'text', 'text': 'Commercial proposal document total 10000', 'html': ''}]})
+
+    monkeypatch.setattr('backend.vision.create_vision_service',
+                        lambda: OpenAIDocumentVisionService(client=Provider()))
+    source = read_document(content, 'digital.pdf')
+    assert 'native_openai_numeric_conflict' in source.routing['issues']
+    assert source.routing['processed_pages'] == []
+
+
+@pytest.mark.parametrize('extension', ['docx', 'xlsx'])
+def test_office_embedded_image_uses_api_and_preserves_native_cells(monkeypatch, extension):
+    from backend.extraction import read_document
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-key')
+    calls = []
+
+    class Provider:
+        def generate(self, messages, schema, **options):
+            page = schema['properties']['page']['enum'][0]
+            calls.append(page)
+            return json.dumps({'page': page, 'complete': True, 'blank': False, 'warnings': [],
+                               'blocks': [{'type': 'text', 'text': 'Image text', 'html': ''}]})
+
+    monkeypatch.setattr('backend.vision.create_vision_service',
+                        lambda: OpenAIDocumentVisionService(client=Provider()))
+    stream = BytesIO()
+    if extension == 'docx':
+        from docx import Document
+        document = Document()
+        document.add_paragraph('Native source')
+        document.add_picture(BytesIO(picture()))
+        document.save(stream)
+    else:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as SheetImage
+        workbook = Workbook()
+        workbook.active['A1'] = 'Native source'
+        workbook.active.add_image(SheetImage(BytesIO(picture())), 'B3')
+        workbook.save(stream)
+    source = read_document(stream.getvalue(), f'office.{extension}')
+    assert calls == [1]
+    assert source.routing['processed_pages'] == [1]
+    assert any(cell.text == 'Native source' for cell in source.cells)
+    assert any(cell.text == 'Image text' and cell.source_method == 'openai-vision' for cell in source.cells)
+
+
 def test_unreadable_source_is_not_reported_absent(monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', '')
     result = process_document(picture(), 'scan.png')
@@ -142,7 +199,7 @@ def test_http_upload_uses_worker_and_both_openai_stages(monkeypatch, tmp_path):
                 cell = source['metadataBlocks'][0]['rows'][0]['cells'][0][0]
                 value = {'fields': [{'field': 'client', 'cell': cell, 'value': 'Альфа'}],
                          'tables': [], 'issues': []}
-            payload = json.dumps({'status': 'completed', 'output': [{'type': 'message',
+            payload = json.dumps({'status': 'completed', 'usage': {'input_tokens': 1000, 'output_tokens': 200}, 'output': [{'type': 'message',
                 'role': 'assistant', 'content': [{'type': 'output_text',
                                                'text': json.dumps(value)}]}]}).encode()
             self.send_response(200)
@@ -168,6 +225,10 @@ def test_http_upload_uses_worker_and_both_openai_stages(monkeypatch, tmp_path):
             assert result['proposal']['client'] == 'Альфа'
             assert calls == ['document_page', 'document_plan']
             assert result['metadata']['verification']['visionComplete']
+            assert result['metadata']['apiUsage']['inputTokens'] == 2000
+            assert result['metadata']['apiUsage']['outputTokens'] == 400
+            assert result['metadata']['apiUsage']['estimatedCostUsd'] == pytest.approx(0.0013)
+            assert {call['stage'] for call in result['metadata']['apiUsage']['calls']} == {'vision', 'semantic'}
             assert result['metadata']['fieldEvidence']['client']['excerpt'] == 'Клиент: Альфа'
             repeat = client.post('/api/extract', files={'file': ('scan.png', picture())})
             assert repeat.json()['metadata']['cacheHit']

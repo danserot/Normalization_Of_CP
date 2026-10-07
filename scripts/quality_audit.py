@@ -1,12 +1,14 @@
 """Generate synthetic commercial proposals and audit extracted form fields.
 
-Run from the repository root: python -m scripts.quality_audit
-All generated names, addresses and document values are fictional.
+Run from the repository root: python -m scripts.quality_audit [API_URL]
+This live audit sends synthetic documents to OpenAI and uses API quota.
+All generated names, addresses and document values are fictional. Use --env-file
+to load configuration; missing API configuration stops before extraction.
 """
 
+import argparse
 import json
 import os
-import sys
 from pathlib import Path
 
 import fitz
@@ -15,9 +17,7 @@ import openpyxl
 import xlwt
 from docx import Document
 from PIL import Image
-from pytesseract import TesseractNotFoundError
-
-from backend.pipeline import process_document
+from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,15 +158,45 @@ def actual_value(proposal, key):
     return items[int(index)].get(field) if int(index) < len(items) else None
 
 
+def ensure_configuration(api_url=None):
+    if api_url:
+        try:
+            with httpx.Client(timeout=10, follow_redirects=False) as client:
+                response = client.get(f"{api_url.rstrip('/')}/api/health")
+                response.raise_for_status()
+                health = response.json()
+        except (httpx.HTTPError, ValueError):
+            raise SystemExit('Не удалось проверить /api/health. Проверьте URL и запущенный backend.') from None
+        if health.get('provider') != 'openai' or health.get('configured') is not True:
+            raise SystemExit('Backend не настроен для OpenAI. Укажите OPENAI_API_KEY в .env сервера и перезапустите backend.')
+    elif not os.getenv('OPENAI_API_KEY', '').strip():
+        raise SystemExit('OpenAI API не настроен. Укажите OPENAI_API_KEY в .env или окружении; используйте --env-file PATH.')
+
+
+def valid_evidence(entry, cells):
+    if isinstance(entry, list):
+        return bool(entry) and all(valid_evidence(value, cells) for value in entry)
+    if not isinstance(entry, dict):
+        return False
+    if entry.get('method') == 'calculated':
+        sources = entry.get('sources', [])
+        return bool(sources) and all(valid_evidence(value, cells) for value in sources)
+    identifier = entry.get('sourceId', entry.get('id'))
+    return identifier in cells and entry.get('excerpt') == cells[identifier]['text']
+
+
 def audit(api_url=None):
-    os.environ["LOCAL_MODEL_ENABLED"] = "false"
+    ensure_configuration(api_url)
+    from backend.canonical import DEADLINE
+    from backend.pipeline import process_document
+
     expected = expected_values()
     report = {}
     for path in sorted(OUTPUT.glob("offer.*")) + [OUTPUT / "offer-scan.pdf"]:
         name = path.name
         try:
             if api_url:
-                with httpx.Client(timeout=200) as client:
+                with httpx.Client(timeout=DEADLINE + 15, follow_redirects=False) as client:
                     response = client.post(f"{api_url.rstrip('/')}/api/extract", files={"file": (name, path.read_bytes())})
                     response.raise_for_status()
                     result = response.json()
@@ -175,28 +205,33 @@ def audit(api_url=None):
             proposal = result["proposal"]
             mismatches = {}
             missing_evidence = []
+            metadata = result['metadata']
+            cells = {cell['id']: cell for cell in metadata['sourceCells']}
             for field, value in expected.items():
                 actual = actual_value(proposal, field)
                 if actual != value:
                     mismatches[field] = {"expected": value, "actual": actual}
-                if field not in result["metadata"]["fieldEvidence"]:
+                if not valid_evidence(metadata['fieldEvidence'].get(field), cells):
                     missing_evidence.append(field)
+            verification = metadata['verification']
+            reviewed = (verification.get('mode') == 'model' and verification.get('reviewCompleted') is True
+                        and verification.get('coverageComplete') is True
+                        and (not verification.get('visionRequired') or verification.get('visionComplete') is True))
             report[name] = {
-                "status": "pass" if not mismatches and not missing_evidence else "mismatch",
+                "status": "mismatch" if mismatches or missing_evidence else "pass" if reviewed else "partial",
                 "fields_correct": len(expected) - len(mismatches),
                 "fields_total": len(expected),
                 "mismatches": mismatches,
                 "missing_evidence": missing_evidence,
-                "warnings": result["metadata"]["warnings"],
-                "ocr_pages": result["metadata"]["ocrPages"],
+                "warnings": metadata["warnings"],
+                "provider": metadata.get('provider'),
+                "outcome": metadata['outcome']['state'],
+                "coverage_complete": verification.get('coverageComplete', False),
+                "review_completed": verification.get('reviewCompleted', False),
+                "vision_pages": metadata.get('routing', {}).get('processed_pages', []),
             }
-        except (TesseractNotFoundError, httpx.HTTPStatusError) as error:
-            if isinstance(error, httpx.HTTPStatusError):
-                detail = error.response.json().get("detail", "")
-                if "Tesseract не установлен" not in detail:
-                    report[name] = {"status": "error", "error": f"HTTP {error.response.status_code}: {detail}"}
-                    continue
-            report[name] = {"status": "unavailable", "reason": "Tesseract is not installed in this environment"}
+        except httpx.HTTPStatusError as error:
+            report[name] = {"status": "error", "error": f"Backend HTTP {error.response.status_code}"}
         except Exception as error:
             report[name] = {"status": "error", "error": f"{type(error).__name__}: {error}"}
     report_name = "audit-http.json" if api_url else "audit.json"
@@ -206,8 +241,19 @@ def audit(api_url=None):
     return report
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('api_url', nargs='?', help='Optional running backend URL; its /api/health must report OpenAI configured')
+    parser.add_argument('--env-file', type=Path, default=Path('.env'))
+    args = parser.parse_args()
+    load_dotenv(args.env_file, override=False)
+    ensure_configuration(args.api_url)
+    print('LIVE OPENAI AUDIT: synthetic documents are sent to the API; usage is billed to the configured project.')
     generate()
-    results = audit(sys.argv[1] if len(sys.argv) > 1 else None)
-    if any(result["status"] in ("error", "mismatch") for result in results.values()):
+    results = audit(args.api_url)
+    if any(result["status"] != 'pass' for result in results.values()):
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

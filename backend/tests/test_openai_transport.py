@@ -87,6 +87,47 @@ def test_only_explicit_transient_statuses_are_retried_inside_document_budget(mon
     assert len(seen) == 3
 
 
+@pytest.mark.parametrize('code, error_type', [
+    ('insufficient_quota', None),
+    ('credit_balance_exhausted', 'insufficient_quota'),
+    ('billing_hard_limit_reached', None),
+    ('provider_quota_limit', 'insufficient_quota'),
+])
+def test_insufficient_quota_is_actionable_sanitized_and_never_retried(monkeypatch, code, error_type):
+    monkeypatch.setenv('OPENAI_API_KEY', 'offline-test-key')
+    monkeypatch.setenv('OPENAI_MAX_RETRIES', '4')
+    monkeypatch.setattr('backend.openai_client.time.sleep', lambda value: pytest.fail('Quota exhaustion must not retry'))
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(429, headers={'retry-after': '1'}, json={'error': {
+            'code': code, 'type': error_type, 'message': 'private document text offline-test-key',
+        }})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(OpenAIError, match='insufficient_quota') as failure:
+            OpenAIResponsesClient(http).generate([], SCHEMA, max_tokens=500, remaining=5)
+    assert len(seen) == 1
+    assert 'баланс' in str(failure.value) and 'проект' in str(failure.value)
+    assert 'private document' not in str(failure.value) and 'offline-test-key' not in str(failure.value)
+
+
+def test_rate_limit_429_is_still_retried(monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'offline-test-key')
+    monkeypatch.setenv('OPENAI_MAX_RETRIES', '2')
+    monkeypatch.setattr('backend.openai_client.time.sleep', lambda value: None)
+    seen = []
+    def handler(request):
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(429, headers={'retry-after': '0'}, json={'error': {
+                'code': 'rate_limit_exceeded', 'message': 'private response details',
+            }})
+        return httpx.Response(200, json=response_payload({'tables': []}))
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        result = OpenAIResponsesClient(http).generate([], SCHEMA, max_tokens=500, remaining=5)
+    assert json.loads(result) == {'tables': []} and len(seen) == 2
+
+
 @pytest.mark.parametrize('status', [400, 401, 403, 404])
 def test_nontransient_errors_are_never_retried_or_leaked(monkeypatch, status):
     monkeypatch.setenv('OPENAI_API_KEY', 'offline-test-key')

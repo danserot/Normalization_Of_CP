@@ -26,7 +26,9 @@ Backend имеет исходящий HTTPS доступ для OpenAI; нару
 
 ## Визуальное чтение
 
-`VISION_PDF_MODE=always` передаёт все PDF-страницы в OpenAI Vision, включая PDF с текстовым слоем. Native текст и числа сохраняются для проверки распознавания и fusion. Ограниченная параллельная обработка страниц сохраняет порядок источников.
+`VISION_PDF_MODE=always` передаёт все PDF-страницы в OpenAI Vision, включая PDF с текстовым слоем. Успешно распознанная OpenAI страница заменяет её native canonical ячейки, чтобы таблицы и позиции не дублировались. Native words остаются внутри backend для дополнительной сверки; значения API не подменяются ими автоматически. Ограниченная параллельная обработка страниц сохраняет порядок источников.
+
+Для цифровых страниц с достаточным native текстом и без embedded images сравнивается состав цифр native текста и API ответа. Несовпадение создаёт `native_openai_numeric_conflict` и не позволяет считать страницу полностью проверенной. Эта консервативная проверка выявляет грубые расхождения; совпадение цифр не подтверждает знак, десятичную позицию, принадлежность чисел строкам или OCR accuracy.
 
 PNG/JPG/JPEG/WEBP/BMP/TIF/TIFF и встроенные растровые изображения DOCX/XLSX читаются visual API после декодирования в PNG. EXIF orientation исправляется перед передачей, TIFF frames обрабатываются отдельными страницами. Native таблицы DOCX/XLSX сохраняют точную структуру; каждая картинка сохраняет имя media source. Повторяющиеся Office media дедуплицируются по SHA-256.
 
@@ -50,7 +52,7 @@ Python проверяет неотрицательные конечные чис
 
 ## API transport, задержка и ограничения
 
-Общий клиент использует reuse HTTP connections, серверный `OPENAI_API_KEY`, `store: false`, ограниченную параллельность и bounded повтор HTTP 429/5xx. Transport timeout не повторяется автоматически: запрос мог уже выполняться у провайдера. Ошибки ключа и schema validation не скрываются повторами; 429, включая quota, получает ограниченное число повторов и понятную ошибку.
+Общий клиент использует reuse HTTP connections, серверный `OPENAI_API_KEY`, `store: false`, ограниченную параллельность и bounded повтор временного HTTP 429/5xx. Transport timeout не повторяется автоматически: запрос мог уже выполняться у провайдера. Ошибки ключа и schema validation не скрываются повторами. HTTP 429 с `credit_balance_exhausted`, `billing_hard_limit_reached` или `insufficient_quota` отклоняется сразу: исчерпанная квота не восстанавливается backoff. Сообщение предлагает проверить баланс, лимиты расходов и проект ключа в [OpenAI billing](https://platform.openai.com/settings/organization/billing/).
 
 `OPENAI_TIMEOUT_SECONDS=120` задаёт бюджет API вызова, включая ожидание concurrency slot и повторные HTTP попытки; `OPENAI_MAX_RETRIES=2` ограничивает число повторов. Все запросы учитывают общий deadline `EXTRACTION_TIMEOUT_SECONDS=300`. Ожидание worker отдельно ограничено `EXTRACTION_QUEUE_WAIT_SECONDS=120`; очередь не обещает, что суммарное время ответа всегда меньше processing deadline.
 
@@ -72,6 +74,8 @@ Exact match по visual source означает совпадение с расп
 
 ## Данные и ключи
 
+`metadata.apiUsage` содержит фактические input/output/cached/reasoning counts из Responses API, список вызовов по этапам vision/semantic и расчётную стоимость USD. Reasoning входит в output и повторно не начисляется. Тариф GPT-5-mini: $0.25/$0.025/$2 за миллион input/cached input/output, снимок 2026-10-07. Неизвестная модель, отсутствующий usage, сетевой сбой или HTTP 5xx дают неполный учёт и неопределённую итоговую стоимость. Это оценка без налогов, а не счёт провайдера. При server cache hit UI показывает нулевой новый расход и отдельно исходную обработку; статистика сохраняется вместе с metadata КП. После жёсткого завершения worker статистика может быть недоступна.
+
 Секрет хранится в ignored `.env` backend и никогда не задаётся через `VITE_*`. Frontend получает результат извлечения, а не API credential. Полный `docker compose config` может раскрыть env; для проверки используйте `config --services` или выводите только безопасные выбранные поля.
 
 Документы и изображения отправляются OpenAI. `store: false` отключает хранение Response для последующего retrieval; применимые служебные retention policies описаны в [официальной документации о данных](https://platform.openai.com/docs/guides/your-data). Миграция API не означает локальную обработку конфиденциальных документов.
@@ -82,6 +86,6 @@ Exact match по visual source означает совпадение с расп
 
 Существующие `training/`, `private_training/`, `models/`, `services/vision/`, разметки и база сохранены. Они являются архивом local inference/training и не участвуют в активном Compose. Пустые GPU/trained overlays сохраняют совместимость старых команд без запуска локальных моделей. Исторические документы сохранены отдельно: [v2 architecture](archive/ARCHITECTURE-v2.md), [v2 validation](archive/VALIDATION-v2.md).
 
-Необходимые проверки миграции: mocked HTTP transport/vision/semantic, source-grounding, порядок и полное покрытие строк, missing/null значения, API failures, bounded queue/deadline, native parsers, annotation/export, production frontend build и Compose config. После настройки реального ключа требуется live smoke на native PDF, скане, изображении, DOCX/Excel и human-reviewed benchmark разнообразных КП. Автотесты без платного API подтверждают implementation contract, но не измеряют OCR accuracy или реальную OpenAI latency.
+Необходимые проверки миграции: mocked HTTP transport/vision/semantic, source-grounding, порядок и полное покрытие строк, missing/null значения, API failures, bounded queue/deadline, native parsers, annotation/export, production frontend build и Compose config. При доступной API квоте требуется live smoke на native PDF, скане, изображении, DOCX/Excel и human-reviewed benchmark разнообразных КП. Автотесты без платного API подтверждают implementation contract, но не измеряют OCR accuracy или реальную OpenAI latency.
 
 Фактическая проверка текущей версии: [VALIDATION.md](VALIDATION.md).

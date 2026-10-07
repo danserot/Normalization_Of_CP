@@ -17,6 +17,7 @@ from .extraction import DEADLINE, DocumentError, read_document
 from .universal import extract_universal
 from .rules import FIELDS, validate
 from .outcome import extraction_outcome
+from .usage import reset_usage, usage_summary
 
 
 class QueueFullError(DocumentError):
@@ -24,6 +25,7 @@ class QueueFullError(DocumentError):
 
 
 def process_document(content, filename):
+    reset_usage()
     started = time.perf_counter()
     source = read_document(content, filename)
     read_ms = round((time.perf_counter() - started) * 1000)
@@ -33,7 +35,7 @@ def process_document(content, filename):
     verification['visionUsed'] = routing.get('used', False)
     verification['visionRequired'] = routing.get('mandatory', False)
     verification['visionStatus'] = routing.get('status', 'native')
-    verification['visionComplete'] = (routing.get('available', False)
+    verification['visionComplete'] = bool(routing.get('available', False)
                                       and routing.get('status') == 'vision'
                                       and not routing.get('issues'))
     if routing.get('embeddedImagesReviewRequired'):
@@ -43,7 +45,7 @@ def process_document(content, filename):
         verification.update(coverageComplete=False, reviewCompleted=False)
     model_ms = round((time.perf_counter() - model_started) * 1000)
     llm_calls = verification.get('llmCalls', 0)
-    model_used = llm_calls > 0
+    model_used = llm_calls > 0 and verification.get('mode') == 'model'
     if result is not None:
         proposal, proof, warnings, used_rows = result
     else:
@@ -65,7 +67,7 @@ def process_document(content, filename):
         source.tables, len(source.cells), llm_calls, model_ms if model_used else 0, total_ms,
         len(warnings), verification.get('mode'))
     return {'proposal': proposal, 'metadata': {
-        'sourceName': filename,
+        'sourceName': filename, 'apiUsage': usage_summary(),
         'parser': ('OpenAI Vision' if routing.get('used') else 'Исходные ячейки документа')
                   + (' + OpenAI: структура КП' if model_used else '') + ' + проверка источников',
         'status': 'empty' if outcome['state'] == 'unavailable' else 'parsed',
@@ -74,12 +76,12 @@ def process_document(content, filename):
                       'render': stage_timings.get('render', 0), 'vision': stage_timings.get('vision', 0),
                       'fusion': stage_timings.get('fusion', 0),
                       'semantic': model_ms if not model_used else 0, 'model': model_ms,
-                      'llm': model_ms if model_used else 0, 'validation': validation_ms,
+                      'llm': model_ms if llm_calls else 0, 'validation': validation_ms,
                       'total': total_ms},
         'confidence': round(min((e['confidence'] for e in proof.values() if isinstance(e, dict)), default=0), 2),
         'confidenceMethod': 'heuristic-source-structure-arithmetic',
         'warnings': list(dict.fromkeys(warnings)), 'fieldEvidence': proof,
-        'sourceCells': source.public(), 'modelUsed': model_used, 'llmCalls': llm_calls,
+        'sourceCells': source.public(), 'modelUsed': model_used, 'llmAttempted': llm_calls > 0, 'llmCalls': llm_calls,
         'architectureVersion': 3, 'provider': 'openai', 'routing': routing,
         'canonicalDocument': source.structure() if hasattr(source, 'structure') else {},
         'documentStats': {'bytes': len(content), 'format': Path(filename).suffix.lower(),

@@ -120,7 +120,7 @@ def test_real_pdf_vision(fixtures, monkeypatch):
     assert result['metadata']['fieldEvidence']['client']['source_method'] == 'openai-vision'
 
 
-@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Requires a ready PaddleOCR-VL 1.6 service')
+@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Enable TEST_VISION=1 with an OpenAI API key for live vision')
 def test_visual_table_and_mixed_pdf(fixtures, monkeypatch):
     monkeypatch.setenv('VISION_ENABLED', 'true')
     with fitz.open(stream=(fixtures / 'table-scan.png').read_bytes(), filetype='png') as image:
@@ -158,7 +158,7 @@ def test_plain_text_is_split_into_text_and_table_blocks():
         'Товар;Количество;Цена\nКабель;2;100'.encode(), 'table.csv').cells)
 
 
-@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Requires a ready multilingual PaddleOCR-VL 1.6 service')
+@pytest.mark.skipif(not os.getenv('TEST_VISION'), reason='Enable TEST_VISION=1 with an OpenAI API key for live multilingual vision')
 def test_kazakh_characters(fixtures, monkeypatch):
     monkeypatch.setenv('VISION_ENABLED', 'true')
     with fitz.open(stream=(fixtures / 'kazakh.png').read_bytes(), filetype='png') as image:

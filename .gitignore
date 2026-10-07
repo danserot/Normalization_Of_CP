@@ -21,7 +21,7 @@ training/data/raw/
 runtime/
 __pycache__/
 test-results/
-output/playwright/
+output/
 .playwright-cli/
 .pytest_cache/
 pytest-cache-files-*/

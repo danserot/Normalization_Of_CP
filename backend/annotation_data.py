@@ -1,4 +1,4 @@
-"""Human review data and inference-compatible training examples. No model calls."""
+"""Human review data and archived training export; images use OpenAI reading."""
 import hashlib
 import json
 import os

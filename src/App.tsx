@@ -23,6 +23,25 @@ type Upload = {
   metadata: ExtractionMetadata;
   error?: string;
 };
+function UsageDetails({ metadata }: { metadata: ExtractionMetadata }) {
+  const usage = metadata.apiUsage;
+  if (!usage) return <p className="validation-note">Расход API: статистика недоступна</p>;
+  const money = (value: number | null) => value === null ? "не определена" : `$${value.toFixed(6)}`;
+  return <details className="validation-note">
+    <summary>{metadata.cacheHit ? "Из кеша · новых токенов: 0 · стоимость сейчас: $0" :
+      `Токены: ${(usage.inputTokens + usage.outputTokens).toLocaleString("ru-RU")} · стоимость API ≈ ${money(usage.estimatedCostUsd)}`}</summary>
+    <p>{metadata.cacheHit ? "Первоначальная обработка: " : ""}Вход: {usage.inputTokens.toLocaleString("ru-RU")} · из них кеш OpenAI: {usage.cachedInputTokens.toLocaleString("ru-RU")} · выход: {usage.outputTokens.toLocaleString("ru-RU")} · из них рассуждения: {usage.reasoningTokens.toLocaleString("ru-RU")}</p>
+    <p>Стоимость обработки ≈ {money(usage.estimatedCostUsd)} · тариф от {usage.pricingDate}, USD, без налогов и сервера.</p>
+    {!usage.complete && <p>Учёт неполный: API не сообщил весь расход или тариф модели неизвестен. Итоговая стоимость не определена.</p>}
+    {(["vision", "semantic"] as const).map(stage => {
+      const calls = usage.calls.filter(call => call.stage === stage);
+      if (!calls.length) return null;
+      const cost = calls.every(call => call.estimatedCostUsd !== null) ? calls.reduce((sum, call) => sum + (call.estimatedCostUsd ?? 0), 0) : null;
+      return <p key={stage}>{stage === "vision" ? "Чтение изображений" : "Разбор структуры"}: {calls.length} запросов · {calls.reduce((sum, call) => sum + call.inputTokens + call.outputTokens, 0).toLocaleString("ru-RU")} токенов · ≈ {money(cost)} · {Array.from(new Set(calls.map(call => call.model))).join(", ")}</p>;
+    })}
+  </details>;
+}
+
 function EvidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
   const entries = Object.values(metadata.fieldEvidence ?? {});
   const scored = entries.filter(
@@ -60,7 +79,7 @@ function EvidenceExplanation({ metadata }: { metadata: ExtractionMetadata }) {
 const builtInModels: ExtractionModel[] = [
   {
     id: "openai",
-    name: "ChatGPT · OpenAI API",
+    name: "Модель",
     description: "Чтение документов, изображений и сканов с привязкой значений к источнику",
     size: "Модель задаётся в настройках сервера",
     recommended: true,
@@ -699,7 +718,7 @@ function App() {
           <span className="eyebrow">READ DOCUMENT</span>
           <h1>Чтение коммерческого предложения</h1>
           <p>
-            ChatGPT читает документы и изображения. Проверьте данные по
+            Загрузите документы и изображения. Проверьте данные по
             оригиналу и сохраните результат.
           </p>
         </div>
@@ -754,8 +773,7 @@ function App() {
               PDF, DOCX, таблицы, текст и изображения · до 25 МБ на файл
             </small>
             <small className="privacy-note">
-              Изображения и сканы отправляются в OpenAI API для чтения текста.
-              Содержимое остальных документов также обрабатывает ChatGPT.
+              Документы и изображения отправляются внешнему API для обработки.
               Отсутствующие данные отмечаются «Не указано в КП»; ошибки чтения
               показываются отдельно. Ключ API хранится на сервере.
             </small>
@@ -764,7 +782,7 @@ function App() {
         {reading && (
           <div className="analysis">
             <div className="spinner" />
-            <h2>ChatGPT читает документы</h2>
+            <h2>Чтение документов</h2>
             <p>
               Готово {readProgress.done} из {readProgress.total}. До двух файлов
               обрабатываются одновременно; результат каждого сохраняется по мере
@@ -827,6 +845,7 @@ function App() {
                       {metadata.routing.mandatory && !metadata.routing.used ? " · требуется визуальная проверка" : ""}
                     </p>
                   )}
+                  <UsageDetails metadata={metadata} />
                   {!!metadata.timingsMs && (
                     <p className="validation-note">
                       Время: чтение {Math.round(metadata.timingsMs.read / 1000)} с · модель {Math.round(metadata.timingsMs.model / 1000)} с · проверка {Math.round(metadata.timingsMs.validation / 1000)} с
@@ -1123,9 +1142,9 @@ function OpenAIProvider({ model, error }: { model: ExtractionModel; error: strin
       <div className="model-selector-heading">
         <div>
           <span className="step-label">ШАГ 1</span>
-          <h2>Распознавание через ChatGPT</h2>
+          <h2>Модель распознавания</h2>
           <p>
-            ChatGPT читает текст, определяет смысл полей и строк таблиц.
+            Модель читает текст, определяет смысл полей и строк таблиц.
             Значения сверяются с источником. Если API недоступен, приложение
             показывает ошибку и позволяет повторить чтение.
           </p>

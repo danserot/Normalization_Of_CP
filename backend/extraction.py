@@ -201,6 +201,8 @@ def read_pdf(source, content):
         for number, page in enumerate(pdf, 1):
             source.check()
             reasons = _pdf_native_page(source, page, number)
+            if not page.get_images() and sum(ch.isalnum() for ch in page.get_text('text')) >= 20:
+                source.routing.setdefault('nativeCrossCheckPages', []).append(number)
             if reasons:
                 required.append(number)
                 source.routing['reasons'].extend(f'page-{number}:{reason}' for reason in reasons)

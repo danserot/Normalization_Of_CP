@@ -1,17 +1,28 @@
-"""Benchmark a directory of supported proposals without sending data off-device."""
-import argparse, csv, json, statistics, sys, time
+"""Benchmark supported proposals through OpenAI; documents leave this device.
+
+This live benchmark uses API quota and reports actual completeness separately
+from request latency. It does not measure OCR accuracy without reviewed answers.
+"""
+import argparse, csv, json, os, statistics, sys, time
 from pathlib import Path
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.extraction import FORMATS
-from backend.pipeline import process_document
-
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path)
     parser.add_argument('--output', type=Path, default=Path('benchmark_results.json'))
+    parser.add_argument('--env-file', type=Path, default=Path('.env'))
     args = parser.parse_args()
+    load_dotenv(args.env_file, override=False)
+    if not os.getenv('OPENAI_API_KEY', '').strip():
+        raise SystemExit('OpenAI API не настроен. Укажите OPENAI_API_KEY в .env или окружении; используйте --env-file PATH.')
+    if not args.folder.is_dir():
+        raise SystemExit('Каталог с документами не найден: ' + str(args.folder))
+    from backend.extraction import FORMATS
+    from backend.pipeline import process_document
+    print('LIVE OPENAI BENCHMARK: documents are sent to the API; usage is billed to the configured project.')
     rows = []
     for path in sorted(p for p in args.folder.rglob('*') if p.is_file() and p.suffix.lower() in FORMATS):
         started = time.perf_counter()
@@ -46,6 +57,7 @@ def main():
         'coverageVerified': sum(r['coverageComplete'] for r in rows),
         'latencyP50Ms': round(statistics.median(durations), 2) if durations else None,
         'latencyP95Ms': durations[max(0, int(len(durations) * .95) - 1)] if durations else None}, 'documents': rows}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     with args.output.with_suffix('.csv').open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.DictWriter(stream, fieldnames=rows[0].keys() if rows else ['filename'])

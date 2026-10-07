@@ -1,4 +1,8 @@
-"""One-time public weight download. Never called by application startup."""
+"""ARCHIVED local GGUF downloader, unused by the OpenAI application.
+
+Running this script exits without downloading or changing files. The old
+download function is retained solely as a record of the former deployment.
+"""
 import hashlib
 from pathlib import Path
 from urllib.request import urlopen
@@ -14,7 +18,8 @@ def digest(path):
         return hashlib.file_digest(file, 'sha256').hexdigest()
 
 
-if __name__ == '__main__':
+def legacy_download():
+    """Historical implementation; not called by this script or application."""
     folder = Path(__file__).resolve().parents[1] / 'models'
     folder.mkdir(exist_ok=True)
     target = folder / FILENAME
@@ -29,3 +34,7 @@ if __name__ == '__main__':
             raise RuntimeError('Model checksum mismatch; refusing to install')
         partial.replace(target)
         print('Verified:', target.name, target.stat().st_size, 'bytes')
+
+
+if __name__ == '__main__':
+    raise SystemExit('ARCHIVED: local model setup is disabled. Configure OPENAI_API_KEY in .env for the current application.')

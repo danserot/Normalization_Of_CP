@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .usage import record_usage
+
 
 class OpenAIError(ValueError):
     """A safe, actionable error without document text or credentials."""
@@ -120,6 +122,18 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
     return min(8., max(.1, delay)) if math.isfinite(delay) else .5
 
 
+def _quota_exhausted(response: httpx.Response) -> bool:
+    """Inspect only quota code/type; never expose the provider's error body."""
+    try:
+        data = response.json()
+        error = data.get('error') if isinstance(data, dict) else None
+        return isinstance(error, dict) and (
+            error.get('code') in {'insufficient_quota', 'credit_balance_exhausted', 'billing_hard_limit_reached'}
+            or error.get('type') == 'insufficient_quota')
+    except (ValueError, TypeError):
+        return False
+
+
 class OpenAIResponsesClient:
     """Thread-safe connection and inference pools shared by all API stages."""
 
@@ -180,10 +194,22 @@ class OpenAIResponsesClient:
                         headers={'Authorization': 'Bearer ' + key},
                         timeout=httpx.Timeout(remaining_request, connect=min(10., remaining_request)))
                 except httpx.HTTPError as error:
+                    record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
                     raise OpenAIError('Не удалось связаться с OpenAI API (' + type(error).__name__ + ')') from None
                 if time.monotonic() >= deadline:
+                    record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
                     raise OpenAIError('Истекло время обработки документа в OpenAI')
+                if response.status_code == 429 and _quota_exhausted(response):
+                    # A depleted balance/project quota cannot recover with
+                    # backoff. Avoid repeated paid-call attempts and explain
+                    # which configuration the user must correct.
+                    raise OpenAIError('OpenAI API: недостаточно квоты проекта (insufficient_quota); '
+                                      'проверьте баланс, лимит расходов и проект API-ключа')
                 if response.status_code == 429 or 500 <= response.status_code < 600:
+                    if response.status_code >= 500:
+                        # A server failure can happen after inference; do not
+                        # claim the known successful usage is the whole bill.
+                        record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
                     if attempt < retries:
                         delay = _retry_delay(response, attempt)
                         if delay + .1 < deadline - time.monotonic():
@@ -200,6 +226,7 @@ class OpenAIResponsesClient:
                     raise OpenAIError(f'OpenAI API: HTTP {response.status_code}; {reason}')
                 try:
                     data = response.json()
+                    record_usage(data, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
                     output = data.get('output', [])
                     if any(part.get('type') == 'refusal' for item in output
                            for part in item.get('content', [])):

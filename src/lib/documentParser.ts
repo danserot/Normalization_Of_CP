@@ -99,7 +99,19 @@ export type ModelRun = {
   routing?: DocumentRouting;
   error?: string;
 };
+export type ApiUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  estimatedCostUsd: number | null;
+  complete: boolean;
+  unreportedCalls: number;
+  pricingDate: string;
+  calls: { stage: string; model: string; inputTokens: number; outputTokens: number; estimatedCostUsd: number | null }[];
+};
 export type ExtractionMetadata = {
+  apiUsage?: ApiUsage;
   sourceName: string;
   parser: string;
   status: ParserStatus;

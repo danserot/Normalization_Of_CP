@@ -19,7 +19,7 @@ IMAGE_FORMATS = ('jpg', 'png', 'webp')
 @pytest.mark.parametrize('filename', [*(f'offer.{ext}' for ext in TEXT_FORMATS), 'offer-scan.pdf'])
 def test_mock_offer_fields_items_and_evidence(filename, monkeypatch):
     if filename == 'offer-scan.pdf' and not os.getenv('TEST_VISION'):
-        pytest.skip('Run with TEST_VISION=1 and a ready PaddleOCR-VL 1.6 service')
+        pytest.skip('Run with TEST_VISION=1 and an OpenAI API key for live vision')
     if filename == 'offer-scan.pdf':
         monkeypatch.setenv('VISION_ENABLED', 'true')
     monkeypatch.setenv('LOCAL_MODEL_ENABLED', 'false')

@@ -1,5 +1,6 @@
 """Merge visual structure with exact native text without making it business data."""
 from dataclasses import dataclass
+from collections import Counter
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 import re
@@ -244,6 +245,23 @@ class DocumentFusion:
                 # commercial items. Native words remain available for review.
                 transcribed_pages.add(number)
                 page_valid = True
+                if number in source.routing.get('nativeCrossCheckPages', []):
+                    native_text = ' '.join(word.text for word in source.native_words if word.page == number)
+                    visual_parts = []
+                    for block in page_result.blocks:
+                        if block.type == 'table':
+                            visual_parts.extend(cell.text for cell in parse_table_html(block.html))
+                        else:
+                            visual_parts.append(block.text)
+                    # Formatting and reading order may differ. A different set
+                    # of digits is still a real discrepancy, never proof that
+                    # the model's transcription is exact to the PDF text layer.
+                    native_digits = Counter(re.findall(r'\d', native_text))
+                    visual_digits = Counter(re.findall(r'\d', ' '.join(visual_parts)))
+                    if native_digits != visual_digits:
+                        page_valid = False
+                        target.warnings.append(f'Страница {number}: числа в тексте OpenAI расходятся с текстовым слоем PDF; проверьте оригинал')
+                        target.routing['issues'].append('native_openai_numeric_conflict')
                 for block in sorted(page_result.blocks, key=lambda b: b.reading_order):
                     if block.type == 'table':
                         start = len(target.cells)

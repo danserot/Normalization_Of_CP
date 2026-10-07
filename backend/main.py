@@ -166,8 +166,8 @@ async def health() -> dict:
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
     configured = await asyncio.to_thread(model_available)
-    return {"models": [{"id": "openai", "name": "OpenAI · " + configured_model(),
-        "description": "OpenAI читает изображения и PDF и определяет поля КП. Значения проверяются по исходному тексту; отсутствующие сведения остаются пустыми.",
+    return {"models": [{"id": "openai", "name": configured_model(),
+        "description": "Чтение изображений и PDF, определение полей КП. Значения проверяются по исходному тексту; отсутствующие сведения остаются пустыми.",
         "size": "API · без локальных моделей", "recommended": True,
         "configured": configured, "installed": configured}]}
 
