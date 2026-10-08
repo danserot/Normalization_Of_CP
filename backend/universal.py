@@ -1,12 +1,9 @@
 """Model-selected layouts; bounded, source-grounded deterministic application."""
 import json
-import math
 import os
 import re
 import time
-from typing import Literal
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
 
 from .extraction import DEADLINE, DocumentError
 from .openai_model import model_available, semantic_model
@@ -14,66 +11,9 @@ from .openai_client import OpenAIError
 from .rules import (FIELDS, evidence, extract_rules, grouped_rows, parse_number, normalized,
                     alternative_blocks, header_paths, preserve_variant_totals)
 from .semantic import classify_label
-
-
-class Strict(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-
-class Quote(Strict):
-    field: str
-    cell: str
-    value: str
-
-
-class Component(Strict):
-    label: str
-    labelCell: str
-    priceColumn: int = Field(ge=0, le=100)
-    totalColumn: int = Field(ge=0, le=100)
-
-
-class ExtraColumn(Strict):
-    label: str
-    labelCell: str
-    column: int = Field(ge=1, le=100)
-
-
-class Table(Strict):
-    block: str
-    firstRow: int = Field(ge=1)
-    lastRow: int = Field(ge=1)
-    nameColumn: int = Field(ge=1, le=100)
-    quantityColumn: int = Field(ge=0, le=100)
-    unitColumn: int = Field(ge=0, le=100)
-    components: list[Component] = Field(max_length=10)
-    extras: list[ExtraColumn] = Field(max_length=30)
-    # Explicit aggregate columns take precedence over calculated components.
-    # Legacy Layout remains unchanged for reviewed training/annotation files.
-    unitPriceColumn: int = Field(default=0, ge=0, le=100)
-    lineTotalColumn: int = Field(default=0, ge=0, le=100)
-    componentMode: Literal['additive', 'alternative'] = 'additive'
-
-
-class Layout(Strict):
-    isItems: bool
-    firstRow: int = Field(ge=1)
-    lastRow: int = Field(ge=1)
-    nameColumn: int = Field(ge=0, le=100)
-    quantityColumn: int = Field(ge=0, le=100)
-    unitColumn: int = Field(ge=0, le=100)
-    components: list[Component] = Field(max_length=10)
-    extras: list[ExtraColumn] = Field(max_length=30)
-
-
-class Requisites(Strict):
-    fields: list[Quote] = Field(max_length=30)
-
-
-class Plan(Strict):
-    fields: list[Quote] = Field(max_length=100)
-    tables: list[Table] = Field(max_length=100)
-    issues: list[str] = Field(max_length=30)
+from .semantic_contracts import Component, ExtraColumn, Layout, Plan, Quote, Requisites, Strict, Table
+from .numeric_values import numeric_quote
+from .source_catalog import catalog, metadata_cells, requisite_batches
 
 
 LAYOUT_SYSTEM = (
@@ -92,32 +32,6 @@ REQUISITES_SYSTEM = (
     'cell — точный id, value — дословная цитата. documentTotal — общий итог, не промежуточный. '
     'Не выдумывай поставщика по имени менеджера. Если данных нет, fields=[].'
 )
-
-
-def requisite_batches(cells):
-    """Shared by production inference and reviewed dataset export."""
-    batch, length = [], 0
-    for cell in cells:
-        if not cell.text:
-            continue
-        row = [cell.id, cell.text]
-        size = len(json.dumps(row, ensure_ascii=False))
-        if batch and length + size > 2500:
-            yield batch
-            batch, length = [], 0
-        batch.append(row)
-        length += size
-    if batch:
-        yield batch
-
-
-def metadata_cells(source, tables):
-    """Keep requisites above/below a table on the same spreadsheet/PDF block."""
-    ranges = {}
-    for table in tables:
-        ranges.setdefault(table.block, []).append((table.firstRow, table.lastRow))
-    return [c for c in source.cells if not any(
-        first <= c.row <= last for first, last in ranges.get(c.block, ()))]
 
 
 def inference_schema(contract, payload):
@@ -193,29 +107,6 @@ extras сохраняют остальные колонки.
 ''' % ', '.join(FIELDS)
 
 SYSTEM = PLAN_SYSTEM
-
-
-def catalog(source):
-    """Compact samples preserve block/column identity and cross-page headers."""
-    blocks = {}
-    for (block, row), cells in grouped_rows(source).items():
-        blocks.setdefault(block, []).append({'row': row, 'cells': [
-            [c.id, c.cell, c.text] for c in cells if c.text]})
-    result = []
-    for block, rows in blocks.items():
-        # All small blocks; larger tables retain header and boundary examples.
-        text_rows = [row for row in rows if row['cells'] and all(numeric_quote(c[2]) is None for c in row['cells'])]
-        headers = [row for index, row in enumerate(rows[:-1]) if len(row['cells']) >= 2
-                   and all(numeric_quote(c[2]) is None for c in row['cells'])
-                   and sum(numeric_quote(c[2]) is not None for c in rows[index + 1]['cells']) >= 2]
-        numeric_rows = [row for row in rows if sum(numeric_quote(c[2]) is not None for c in row['cells']) >= 1]
-        sample = rows if len(rows) <= 12 else sorted(
-            {row['row']: row for row in rows[:5] + text_rows[:6] + headers[:6]
-             + numeric_rows[:2] + numeric_rows[len(numeric_rows) // 2:len(numeric_rows) // 2 + 1]
-             + rows[-3:]}.values(), key=lambda row: row['row'])
-        result.append({'block': block, 'rowCount': len(rows), 'firstRow': rows[0]['row'],
-                       'lastRow': rows[-1]['row'], 'rows': sample})
-    return result
 
 
 def plan_payload(source):
@@ -326,19 +217,6 @@ def request_plan(source, payload, *, review=False):
 def infer_plan(source, data):
     """One compact structured inference per ambiguous document."""
     return request_plan(source, data)
-
-
-def numeric_quote(text):
-    value = parse_number(text)
-    if value is not None:
-        return value
-    # Explicit comma decimals in estimates may have up to six fractional digits.
-    # Accept malformed PDF spacing only with an explicit decimal separator.
-    raw = text.strip()
-    if re.fullmatch(r'[+]?[\d \u00a0\u202f]+,\d{1,6}', raw):
-        value = float(re.sub(r'[ \u00a0\u202f]', '', raw).replace(',', '.'))
-        return value if math.isfinite(value) else None
-    return None
 
 
 SUMMARY_PREFIX = re.compile(

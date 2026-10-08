@@ -7,15 +7,12 @@ Coordinates use PDF points, with the origin at the upper-left corner.
 from dataclasses import asdict, dataclass, field
 import os
 import time
+from .errors import DocumentError
 
 
 MAX_CHARS = int(os.getenv('MAX_CHARS', '200000'))
 MAX_CELLS = int(os.getenv('MAX_CELLS', '30000'))
 DEADLINE = min(1800, max(10, int(os.getenv('EXTRACTION_TIMEOUT_SECONDS', '300'))))
-
-
-class DocumentError(ValueError):
-    pass
 
 
 @dataclass

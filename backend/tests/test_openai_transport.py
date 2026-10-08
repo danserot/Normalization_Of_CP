@@ -23,13 +23,13 @@ def response_payload(value):
              'content': [{'type': 'output_text', 'text': json.dumps(value)}]}]}
 
 
-def test_strict_schema_normalizes_nested_refs_and_nullable_defaults_without_mutation():
+def test_strict_schema_normalizes_refs_and_preserves_declared_nullability():
     result = strict_schema(SCHEMA)
     table = result['$defs']['Table']
     assert result['additionalProperties'] is False
     assert table['additionalProperties'] is False
     assert table['required'] == ['name', 'quantityColumn', 'comment']
-    assert table['properties']['quantityColumn'] == {'anyOf': [{'type': 'integer'}, {'type': 'null'}]}
+    assert table['properties']['quantityColumn'] == {'type': 'integer'}
     assert table['properties']['comment'] == {'anyOf': [{'type': 'string'}, {'type': 'null'}]}
     assert SCHEMA['$defs']['Table']['properties']['quantityColumn']['default'] == 0
     assert SCHEMA['$defs']['Table']['required'] == ['name']
@@ -150,9 +150,10 @@ def test_network_failure_is_not_replayed_and_is_sanitized(monkeypatch):
         seen.append(request)
         raise httpx.ReadTimeout('private request body secret', request=request)
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        with pytest.raises(OpenAIError, match='ReadTimeout') as failure:
+        with pytest.raises(OpenAIError, match='не ответил вовремя') as failure:
             OpenAIResponsesClient(http).generate([], SCHEMA, max_tokens=500, remaining=5)
     assert 'private' not in str(failure.value) and len(seen) == 1
+    assert 'ReadTimeout' not in str(failure.value)
 
 
 def test_expired_budget_prevents_provider_call(monkeypatch):

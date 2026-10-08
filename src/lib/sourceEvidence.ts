@@ -6,23 +6,26 @@ export const sourceMethodLabel = (method?: string): string => {
   if (method.endsWith("+rule"))
     return `${sourceMethodLabel(method.slice(0, -5))} · назначение по правилам`;
   return (
-    {
-      native: "исходный текст",
-      "pdf-native": "исходный текст PDF",
-      "docx-native": "структура Word",
-      "xlsx-native": "ячейка Excel",
-      "openai-vision": "распознанный текст",
-      "openai-vision+native": "исходный текст · визуальное чтение",
-      openai: "смысл определён моделью",
-      openpyxl: "ячейка Excel",
-      "python-docx": "структура Word",
-      "pdf-native+vision": "исходный текст PDF · визуальная структура",
-      "paddleocr-vl": "визуальное чтение PDF",
-      "paddleocr-vl+native": "исходный текст PDF · визуальная структура",
-      vision: "визуальное чтение",
-      model: "смысл определён моделью",
-      ocr: "распознанный текст",
-      manual: "проверено вручную",
-    } as Record<string, string>
-  )[method] ?? method;
+    (
+      {
+        native: "исходный текст",
+        "pdf-native": "исходный текст PDF",
+        "docx-native": "структура Word",
+        "xlsx-native": "ячейка Excel",
+        "openai-vision": "распознанный текст",
+        "openai-vision+native": "исходный текст · визуальное чтение",
+        openai: "смысл определён моделью",
+        openpyxl: "ячейка Excel",
+        "python-docx": "структура Word",
+        "pdf-native+vision": "исходный текст PDF · визуальная структура",
+        "paddleocr-vl": "визуальное чтение PDF",
+        "paddleocr-vl+native": "исходный текст PDF · визуальная структура",
+        vision: "визуальное чтение",
+        model: "смысл определён моделью",
+        "model-document": "прочитано моделью · требует сверки",
+        ocr: "распознанный текст",
+        manual: "проверено вручную",
+      } as Record<string, string>
+    )[method] ?? method
+  );
 };

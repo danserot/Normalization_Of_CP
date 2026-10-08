@@ -1,4 +1,4 @@
-import type { ParseResult } from "./documentParser";
+import type { ParseResult } from "../types/extraction";
 
 const backendFormats =
   /\.(pdf|docx|xlsx|xls|csv|tsv|txt|json|png|jpe?g|webp|bmp|tiff?)$/i;
@@ -54,8 +54,14 @@ export const parseWithExtractionApi = async (
     });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "TimeoutError")
-      throw new Error("Время ожидания распознавания истекло. Повторите чтение документа.", { cause });
-    throw new Error("Не удалось связаться с сервером распознавания. Проверьте подключение и повторите чтение.", { cause });
+      throw new Error(
+        "Время ожидания распознавания истекло. Повторите чтение документа.",
+        { cause },
+      );
+    throw new Error(
+      "Не удалось связаться с сервером распознавания. Проверьте подключение и повторите чтение.",
+      { cause },
+    );
   }
   if (!response.ok) {
     notifyUnauthorized(response.status);
@@ -63,8 +69,9 @@ export const parseWithExtractionApi = async (
       detail?: string;
     };
     throw new Error(
-      typeof payload.detail === "string" ? payload.detail :
-      `Сервер распознавания вернул ${response.status}`,
+      typeof payload.detail === "string" ?
+        payload.detail
+      : `Сервер распознавания вернул ${response.status}`,
     );
   }
   return response.json() as Promise<ParseResult>;

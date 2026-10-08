@@ -1,130 +1,66 @@
-# ReadDocument: коммерческие предложения через OpenAI API
+﻿# ReadDocument: извлечение КП моделью
 
-React + FastAPI приложение превращает КП в проверяемый JSON и сохраняет предложения в SQLite. Изображения и страницы PDF читает OpenAI Vision, смысл реквизитов и колонок определяет OpenAI через Responses API. Локальные LLM, Paddle и Tesseract в рабочем Docker-окружении не запускаются и не скачиваются.
+Исходный файл отправляется в Responses API. Модель возвращает готовое КП: реквизиты, товары, прочитанные фрагменты и цитаты. Локальные парсеры, OCR, правила извлечения и semantic Plan в рабочем пути не вызываются.
 
-Отсутствующие данные остаются пустыми или `null`: приложение сообщает, что реквизит не указан в КП. Python сохраняет исходные значения, применяет план ко всем строкам таблиц и проверяет арифметику. Распознанный текст, предупреждения и ссылки на источники доступны для проверки человеком.
+Python проверяет JSON, допустимость чисел и арифметику. Отсутствующие значения не заполняются. При ошибке API возвращается ошибка, а не результат резервных правил.
 
-## Быстрый запуск
+## Запуск
 
-Нужны Docker Desktop с Docker Compose и OpenAI API key. Ключ используется только backend и не попадает в frontend bundle.
+1. Создайте `.env` из `.env.example`, если его ещё нет. Существующий файл сохраняйте.
+2. Укажите `OPENAI_API_KEY` и `OPENAI_MODEL`.
+3. Выполните `docker compose up -d --build`.
+4. Откройте http://127.0.0.1:8080.
 
-1. Если `.env` ещё нет, создайте его из `.env.example`:
+Предложения и разметка остаются в прежнем volume `proposal_data`. Не удаляйте volume, если нужна база.
 
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+## Передача документов
 
-2. Укажите `OPENAI_API_KEY` в `.env`. Существующий `.env` сохраняйте: добавьте новые настройки из примера. Без ключа `POST /api/extract` возвращает `503` с инструкцией настроить `.env`.
-3. Запустите приложение:
-
-   ```powershell
-   docker compose up -d --build
-   ```
-
-4. Откройте `http://127.0.0.1:8080`. Проверка конфигурации: `GET /api/health`; извлечение: `POST /api/extract`, multipart-поле `file`.
-
-`/api/health` показывает конфигурацию провайдера и моделей. Наличие ключа и успешный HTTP health не подтверждают оплату, квоту или качество реального извлечения; это проверяет загрузка документа.
-
-Если OpenAI отвечает `429` с `credit_balance_exhausted` / `insufficient_quota`, проверьте баланс и лимиты проекта в [OpenAI API billing](https://platform.openai.com/settings/organization/billing/). Это исчерпание средств/квоты проекта; приложение показывает понятную ошибку и не повторяет такой запрос автоматически. При последней реальной проверке именно эта ошибка ограничила live извлечение: ключ в `.env` задан и API отвечает, но успешное OCR пока не подтверждено.
-
-База остаётся в прежнем `proposal_data`. При переходе со старой версии сначала остановите старые `model` и `vision` контейнеры, если они работают, и запустите Compose выше. Сохранённые `models/`, `private_training/`, `training/` и старые model-cache volumes не участвуют в обработке. Не используйте `docker compose down -v`, если нужна сохранённая база.
-
-## Как обрабатывается документ
-
-```text
-Документ -> проверка формата и лимитов
-  PDF / изображение -> OpenAI Vision -> текст, блоки, таблицы
-  DOCX / Excel / текст -> native parser -> точные исходные ячейки
-                         |
-                  CanonicalDocument
-                         |
-              OpenAI: план реквизитов и колонок
-                         |
-               Python: все строки + evidence
-                         |
-          проверка сумм и пропусков -> JSON + предупреждения
-```
-
-| Источник | Обработка |
+| Формат | Передача |
 | --- | --- |
-| PDF | Все страницы визуально читаются OpenAI по умолчанию (`VISION_PDF_MODE=always`). Canonical ячейки берутся из ответа API; native words сохраняются внутри backend для дополнительной сверки. |
-| PNG / JPG / JPEG / WEBP / BMP / TIF / TIFF | Изображения, включая TIFF frames, преобразуются в PNG и читаются OpenAI Vision. |
-| DOCX | Native текст, таблицы и колонтитулы плюс чтение встроенных растровых изображений OpenAI. |
-| XLSX | Native листы, строки, колонки и cached значения плюс встроенные растровые изображения OpenAI. Формулы не пересчитываются. |
-| XLS | Native ячейки и OpenAI semantic mapping. Встроенные картинки не проверяются: для них требуется XLSX или PDF, и UI сообщает об ограничении. |
-| CSV / TSV / TXT / JSON | Native чтение плюс OpenAI semantic review. JSON должен содержать данные исходного КП. |
+| PDF, DOCX, XLSX, XLS, CSV, TSV, TXT, JSON | Полные исходные байты через `input_file`, без локального извлечения текста и колонок. |
+| PNG, JPG, WEBP, BMP, TIFF | Через `input_image`; изображения преобразуются в PNG, все TIFF frames передаются без OCR. |
 
-Если визуальный API не смог прочитать источник, это явно отражается в ошибке или неполной проверке. Native текст не превращает неудачный Vision в успешное визуальное извлечение. Ошибки ключа, квоты, timeout и ограничений контекста сообщаются отдельно от отсутствующих в КП реквизитов.
+Передача полного файла не гарантирует полное чтение. По [официальной документации](https://developers.openai.com/api/docs/guides/file-inputs) PDF обрабатывается с текстом и изображениями страниц, DOCX — как текст без встроенных изображений, таблицы — до первых 1000 строк каждого листа. Ограничения показаны в результате. Формулы Excel локально не пересчитываются. Для проверки оформления Word используйте PDF.
 
-Встроенные в Office векторные/неподдерживаемые изображения явно отмечаются как непрочитанные. Лимит одного исходного растрового изображения — 40 миллионов пикселей; число кадров/страниц ограничено `VISION_MAX_PAGES`.
+`proposal` — готовое КП, `cells` — транскрипция модели, `evidence` — её ссылки и цитаты. Все цитаты имеют `verifiedInSource=false`: они не подтверждены независимым парсером. `coverageComplete=false`, отдельно сохраняется `modelReportedComplete`. Важные значения необходимо сверять с оригиналом.
 
-## Скорость и качество
-
-- Обработка PDF-страниц ограниченно параллельна: `OPENAI_VISION_CONCURRENCY=3`. Не требуется загружать веса моделей в RAM/VRAM.
-- Вместо генерации JSON для каждой товарной строки OpenAI возвращает компактный semantic Plan; Python применяет mapping к таблице целиком.
-- `EXTRACTION_WORKERS=3` позволяет обрабатывать несколько документов; очередь ограничена, а ожидание и обработка имеют отдельные deadlines.
-- Завершённые результаты повторных загрузок используют SHA-256 cache с учётом настроек. Ошибки и незавершённые проверки не кешируются как успешные результаты.
-- Повторные API запросы ограничены; больше параллелизма не гарантирует меньшую задержку при rate limits. Реальная скорость зависит от длины документа, модели, сети и квоты API.
-- Значение принимается при подтверждённой цитате исходной ячейки. Количество/цена не заполняются придуманными `1`/`0`. Альтернативные стоимости сохраняются отдельно, а отсутствующий единый итог не выбирается случайно.
-- Для подходящих цифровых PDF-страниц сравнивается состав цифр native текста и ответа OpenAI. Расхождение делает visual review незавершённым; совпадение не доказывает OCR accuracy и не подтверждает положение каждого числа.
-- Confidence — эвристическая оценка качества источников и проверок, а не измеренный процент правильности OCR.
+Новые загрузки редактора разметки используют тот же модельный путь. Роли таблиц подтверждает человек. Существующие записи и экспорт сохранены; автоматическая разметка остаётся черновиком.
 
 ## Настройки
 
-Полный перечень: [.env.example](.env.example). Основные значения:
+- `OPENAI_MODEL=gpt-5-mini`: модель для всего извлечения.
+- `OPENAI_PROXY_URL`: необязательный HTTP/HTTPS-прокси для запросов backend к API. В Docker используйте `host.docker.internal` вместо `localhost`, если прокси запущен на компьютере.
+- `MODEL_DOCUMENT_MAX_OUTPUT_TOKENS=24000`: лимит готового КП и транскрипции. Обрезанный ответ отклоняется.
+- `OPENAI_TIMEOUT_SECONDS=120`, `EXTRACTION_TIMEOUT_SECONDS=300`: deadlines.
+- `EXTRACTION_WORKERS=3`, `EXTRACTION_QUEUE_LIMIT=8`: workers и очередь.
+- `MAX_FILE_SIZE_MB=25`: лимит оригинала.
+- `VISION_MAX_PAGES=50`: лимит кадров многокадровых изображений.
 
-| Настройка | По умолчанию | Назначение |
-| --- | --- | --- |
-| `OPENAI_MODEL` | `gpt-5-mini` | Semantic Plan. |
-| `OPENAI_VISION_MODEL` | пусто | Использует `OPENAI_MODEL`; можно отдельно выбрать модель с поддержкой изображений и Structured Outputs. |
-| `OPENAI_API_URL` | `https://api.openai.com/v1/responses` | Responses endpoint; также допускается API base URL. |
-| `OPENAI_TIMEOUT_SECONDS` | `120` | Бюджет одного API вызова с ожиданием слота и повторами, внутри общего deadline. |
-| `OPENAI_MAX_RETRIES` | `2` | Максимум повторов временного HTTP 429/5xx; исчерпанная квота не повторяется. |
-| `OPENAI_MAX_CONCURRENCY` / `OPENAI_VISION_CONCURRENCY` | `4` / `3` | Ограничение одновременно выполняемых API/visual запросов в рабочем процессе. |
-| `OPENAI_VISION_MAX_OUTPUT_TOKENS` | `14000` | Ограничение ответа visual extraction. |
-| `OPENAI_REASONING_EFFORT` | `minimal` | Настройка модели для небольшой задержки; должна поддерживаться выбранной моделью. |
-| `SEMANTIC_MODEL_MODE` | `always` | Semantic review каждого КП; в Compose закреплён режим API. |
-| `SEMANTIC_CONTEXT_CHARS` / `SEMANTIC_MAX_OUTPUT_TOKENS` | `60000` / `8192` | Лимиты semantic request. |
-| `VISION_PDF_MODE` | `always` | Визуальное чтение всех PDF-страниц. |
-| `VISION_RENDER_DPI` / `VISION_MAX_SIDE` | `144` / `2400` | Разрешение и ограничение размера изображения страницы. |
-| `VISION_MAX_PAGES` | `50` | Ограничение страниц; превышение не считается полной проверкой. |
-| `EXTRACTION_TIMEOUT_SECONDS` | `300` | Общий deadline обработки одного документа. |
-| `EXTRACTION_WORKERS` / `EXTRACTION_QUEUE_LIMIT` | `3` / `8` | Рабочие процессы и bounded queue. |
-| `EXTRACTION_QUEUE_WAIT_SECONDS` | `120` | Максимальное ожидание свободного worker. |
-| `MAX_FILE_SIZE_MB` | `25` | Лимит файла. |
+Существующий `.env` может менять defaults. Старые `SEMANTIC_*` и параметры PDF-render больше не управляют рабочим извлечением. Учёт токенов и стоимости сохранён. Кешируются согласованные завершённые ответы с цитатами; кеш не является независимой проверкой.
 
-144 DPI и 2400 px — стартовые настройки проекта. Для мелкого текста увеличивайте разрешение, оценивая качество на своих КП и время ответа. Параллелизм увеличивайте после измерения нагрузки; каждый worker имеет собственные API лимиты.
+Ключ используется только backend. Документы передаются внешнему API; установлен `store:false`. Health подтверждает конфигурацию, а не доступность сети или качество модели.
 
-Документы и изображения передаются OpenAI. Запросы используют `store: false`; этот параметр не означает отсутствие всех служебных retention policies. Подробности API: [Responses](https://platform.openai.com/docs/api-reference/responses), [изображения](https://platform.openai.com/docs/guides/images-vision), [Structured Outputs](https://platform.openai.com/docs/guides/structured-outputs), [работа с данными](https://platform.openai.com/docs/guides/your-data).
+## Проверка соединения
 
-## Локальная разработка и проверки
+Если соединение с API обрывается, backend возвращает HTTP 503 и безопасные поля `error.code`, `error.stage`, `error.retryable`. Ошибки формата документа возвращаются отдельно, с HTTP 422. Интерфейс показывает причину рядом с файлом и позволяет повторить только неудачные загрузки.
+
+Для проверки сети без API-ключа и документов:
 
 ```powershell
-python -m venv .venv
-.venv/Scripts/python -m pip install -r backend/requirements-test.txt
-.venv/Scripts/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
-npm ci
-npm run dev
+.venv/Scripts/python scripts/api_diagnostics.py
+Get-Content -Raw -Encoding utf8 scripts/api_diagnostics.py | docker compose exec -T backend python -
 ```
 
+Скрипт проверяет DNS, HTTPS к API и контрольному сайту, затем TLS 1.2 с проверкой сертификата. HTTP 401 при запросе `/v1/models` без ключа подтверждает доступность API. Сброс TLS до HTTP-ответа означает проблему соединения; он не подтверждает ошибку ключа или файла. Для VPN нужен доступ из backend, включая Docker. После настройки прокси пересоздайте backend: `docker compose up -d backend`.
+
+## Проверки
+
 ```powershell
-docker build -f backend/Dockerfile.test -t readdocument-backend-test .
-docker run --rm --network none readdocument-backend-test
+.venv/Scripts/python -m pytest backend/tests/test_model_document.py backend/tests/test_request_schema.py backend/tests/test_provider_errors.py backend/tests/test_annotation_architecture.py backend/tests/test_openai_transport.py backend/tests/test_usage.py backend/tests/test_universal.py backend/tests/test_semantic_plan.py -q
 npm run lint
 npm run build
-docker compose --env-file .env.example config --services
 ```
 
-Contract tests используют mocked HTTP и не расходуют API quota. Для реального smoke нужен настроенный ключ и документ с известными ожидаемыми значениями:
+Тесты используют MockTransport и синтетические ответы. Они не измеряют качество реальной модели. Старые тесты native/Plan-архитектуры сохранены, их fallback-ожидания не являются контрактом нового режима.
 
-```powershell
-.venv/Scripts/python -m scripts.vision_smoke path/to/proposal.pdf --require-vision --require-semantic --expected-items 4
-```
-
-Фактические результаты и ограничения: [docs/VALIDATION.md](docs/VALIDATION.md). Подробные решения и критерии качества: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Разметка и архив локального inference
-
-Рабочее место разметки сохраняет оригинал, ячейки и выбранные evidence; существующая база и training data остаются. Локальное обучение не запускается при загрузке документа или экспорте. Старые Qwen/Paddle/GGUF инструкции, `services/vision/` и training artifacts сохранены как архив прежней архитектуры; текущий Compose ими не пользуется.
-
-`docker-compose.gpu.yml` и `docker-compose.trained.yml` теперь пустые compatibility overlays: их подключение не запускает модели и не требует GPU. Архивные отчёты: [архитектура v2](docs/archive/ARCHITECTURE-v2.md), [проверка v2](docs/archive/VALIDATION-v2.md). Инструкции `training/` описывают исторический local training workflow.
+[Архитектура](docs/ARCHITECTURE.md), [результаты проверки](docs/VALIDATION.md). Legacy-модули и локальное обучение остаются для истории и старых данных, но не извлекают новые КП.

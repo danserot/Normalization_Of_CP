@@ -1,4 +1,4 @@
-"""Human review data and archived training export; images use OpenAI reading."""
+"""Model-backed human review and explicit compatibility with archived exports."""
 import hashlib
 import json
 import os
@@ -7,47 +7,16 @@ from dataclasses import fields as dataclass_fields
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from typing import Literal
+from zipfile import ZipFile
 
-import fitz
-from docx import Document
-from docx.table import Table as WordTable
-from docx.text.paragraph import Paragraph
-from docx.text.run import Run
-from pydantic import Field
+from .annotation_models import Annotation, MarkedField, MarkedTable, SaveAnnotation
+from .canonical import Cell, DocumentError, Source
+from .numeric_values import numeric_quote
+from .outcome import FIELD_LABELS
+from .semantic_contracts import Layout
+from .source_catalog import catalog, metadata_cells, requisite_batches
 
-from .extraction import Cell, DocumentError, Source, check_zip, decode, read_document
-from .rules import FIELDS, HEADERS, extract_rules, normalized
-from .universal import LAYOUT_SYSTEM, REQUISITES_SYSTEM, Layout, Strict, catalog, metadata_cells, numeric_quote, requisite_batches
-
-
-class MarkedField(Strict):
-    field: str = Field(max_length=100)
-    state: str = Field(pattern='^(pending|found|missing)$')
-    cell: str = Field(default='', max_length=100)
-    value: str = Field(default='', max_length=2000)
-
-
-class MarkedTable(Layout):
-    block: str = Field(max_length=200)
-    reviewed: bool = False
-    componentMode: Literal['additive', 'alternative'] = 'additive'
-    unitPriceColumn: int = Field(default=0, ge=0, le=100)
-    lineTotalColumn: int = Field(default=0, ge=0, le=100)
-
-
-class Annotation(Strict):
-    fields: list[MarkedField] = Field(max_length=30)
-    tables: list[MarkedTable] = Field(max_length=100)
-    issues: list[str] = Field(default_factory=list, max_length=30)
-    group: str = Field(default='', max_length=200)
-    notes: str = Field(default='', max_length=5000)
-
-
-class SaveAnnotation(Strict):
-    revision: int = Field(ge=1)
-    status: str = Field(pattern='^(draft|reviewed)$')
-    annotation: Annotation
+FIELDS = tuple(FIELD_LABELS)
 
 
 def source_from_payload(payload, filename):
@@ -72,6 +41,9 @@ def source_from_payload(payload, filename):
 
 
 def draft_annotation(source, proof):
+    """Compatibility suggestions for archived scripts, outside active extraction."""
+    from .rules import HEADERS, normalized
+
     fields = []
     for key in FIELDS:
         candidate = proof.get(key)
@@ -113,7 +85,15 @@ def draft_annotation(source, proof):
 
 def word_preview(content):
     """Safe text/table preview. Embedded raster images are intentionally ignored."""
-    check_zip(content)
+    from docx import Document
+    from docx.table import Table as WordTable
+    from docx.text.paragraph import Paragraph
+    from docx.text.run import Run
+
+    with ZipFile(BytesIO(content)) as archive:
+        entries = archive.infolist()
+        if len(entries) > 5000 or sum(entry.file_size for entry in entries) > 80 * 1024**2:
+            raise DocumentError("??????? ??????? ????????????? ???????? (????? 80 ??)")
     doc = Document(BytesIO(content))
 
     def paragraph_html(paragraph):
@@ -157,34 +137,40 @@ def word_preview(content):
 
 
 def prepare_annotation(content, filename):
-    suffix = Path(filename).suffix.lower()
-    if suffix == '.pdf':
-        with fitz.open(stream=content, filetype='pdf') as pdf:
-            if pdf.needs_pass or not 0 < len(pdf) <= 50:
-                raise DocumentError('PDF защищён паролем или превышает 50 страниц')
-            preview = {'kind': 'pdf', 'pages': len(pdf)}
-    elif suffix == '.docx':
-        preview = {'kind': 'word', 'html': word_preview(content)}
-    elif suffix in {'.txt', '.json'}:
-        text = decode(content)
-        if len(text) > 200_000:
-            raise DocumentError('Превышен лимит 200 000 символов')
-        preview = {'kind': 'text', 'text': text}
-    else:
-        preview = {'kind': 'table'}
-    try:
-        source = read_document(content, filename)
-    except DocumentError as error:
-        if preview['kind'] not in {'pdf', 'word', 'text'}:
-            raise
-        return {'cells': [], 'warnings': [str(error)], 'parseError': str(error), 'preview': preview,
-                'annotation': draft_annotation(Source(filename), {})}
-    proposal, proof, warnings, _ = extract_rules(source)
-    return {'cells': source.public(), 'warnings': list(dict.fromkeys([*source.warnings, *warnings])),
-            'routing': getattr(source, 'routing', {}),
-            'canonicalDocument': source.structure() if hasattr(source, 'structure') else {},
-            'parseError': '', 'preview': preview,
-            'suggestion': proposal, 'annotation': draft_annotation(source, proof)}
+    """New uploads use model output; existing saved annotations remain readable."""
+    from .model_document import extract_model_document
+    result = extract_model_document(content, filename)
+    metadata = result['metadata']
+    cells = metadata['sourceCells']
+    source = source_from_payload({'cells': cells}, filename)
+    fields = []
+    for key in FIELDS:
+        candidate = metadata['fieldEvidence'].get(key)
+        cell = next((cell for cell in cells if candidate and cell['id'] == candidate['sourceId']), None)
+        fields.append({'field': key, 'state': 'pending',
+                       'cell': cell['id'] if cell else '',
+                       'value': candidate['excerpt'] if candidate and cell else ''})
+    # Table roles are chosen by the reviewer; no rules infer them from headers.
+    tables = []
+    blocks = dict.fromkeys(cell.block for cell in source.cells if cell.kind == 'table')
+    for block in blocks:
+        block_cells = [cell for cell in source.cells if cell.block == block]
+        if max(cell.cell for cell in block_cells) < 2:
+            continue
+        rows = [cell.row for cell in block_cells]
+        tables.append({'block': block, 'reviewed': False, 'isItems': False,
+                       'firstRow': min(rows), 'lastRow': max(rows),
+                       'nameColumn': 0, 'quantityColumn': 0, 'unitColumn': 0,
+                       'components': [], 'extras': [], 'componentMode': 'additive',
+                       'unitPriceColumn': 0, 'lineTotalColumn': 0})
+    preview = ({'kind': 'pdf', 'pages': max((cell.page or 0 for cell in source.cells), default=0)}
+               if Path(filename).suffix.lower() == '.pdf'
+               else {'kind': 'text', 'text': result['proposal']['notes']})
+    return {'cells': cells, 'warnings': metadata['warnings'], 'parseError': '', 'preview': preview,
+            'suggestion': result['proposal'],
+            'annotation': {'fields': fields, 'tables': tables, 'issues': metadata['warnings'][:30],
+                           'group': '', 'notes': 'Транскрипция модели; проверьте по оригиналу.'},
+            'apiUsage': metadata['apiUsage'], 'sourceIndependentlyVerified': False}
 
 
 def validate_annotation(annotation, payload, filename, reviewed):
@@ -253,6 +239,9 @@ def validate_annotation(annotation, payload, filename, reviewed):
 
 
 def training_examples(annotation, payload, filename):
+    # Archived prompts are loaded only on an explicit dataset export.
+    from .universal import LAYOUT_SYSTEM, REQUISITES_SYSTEM
+
     source = source_from_payload(payload, filename)
     layouts = {t.block: t for t in annotation.tables}
     result, previous = [], None

@@ -329,6 +329,7 @@
   border-radius: 14px;
   padding: 6px 11px;
   font-size: 12px;
+  white-space: nowrap;
 }
 .confirmed-badge {
   color: #328f70;
@@ -354,6 +355,43 @@
   padding: 13px 0;
   font-size: 13px;
   gap: 16px;
+}
+.result-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 24px;
+  width: 100%;
+}
+.result-summary .source-link {
+  flex: 0 0 130px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.result-summary .status {
+  text-align: left;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.result-details {
+  width: 100%;
+  font-size: 12px;
+  color: #526574;
+  line-height: 1.6;
+}
+.result-details > summary {
+  cursor: pointer;
+  width: fit-content;
+  color: #6b7d89;
+}
+.result-details > p {
+  margin: 8px 0;
+}
+.result-warnings {
+  padding-left: 20px;
+  color: #ad7542;
+}
+.retry-actions {
+  margin: -6px 0 22px;
 }
 .confidence-explanation {
   flex-basis: 100%;
@@ -614,6 +652,13 @@
   .status {
     text-align: left;
   }
+  .result-summary {
+    flex-direction: column;
+    gap: 6px;
+  }
+  .result-summary .source-link {
+    flex-basis: auto;
+  }
   .model-selector-heading {
     flex-direction: column;
   }
@@ -841,17 +886,3 @@
     flex: 1 1 auto;
   }
 }
-.extraction-notices {
-  margin: 16px 0;
-  padding: 16px 20px;
-  border: 1px solid #e5dfd0;
-  border-radius: 12px;
-  background: #faf8f2;
-  color: #514a3b;
-}
-.extraction-notices .notice-primary { margin: 8px 0 12px; line-height: 1.5; }
-.extraction-notices summary { cursor: pointer; font-size: 13px; color: #6b665b; }
-.extraction-notices ul { padding-left: 20px; margin-bottom: 0; }
-.extraction-notices li { margin-top: 8px; overflow-wrap: anywhere; }
-.extraction-notices li p { margin: 0 0 4px; }
-.extraction-notices li span { font-size: 13px; color: #6b665b; }

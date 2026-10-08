@@ -1,45 +1,43 @@
-# Проверка миграции OpenAI API — 2026-10-07
+﻿# Проверка прямого модельного извлечения — 08.10.2026
 
-Текущая версия использует OpenAI Responses API для визуального чтения и semantic Plan. Предыдущая Qwen/Paddle проверка сохранена отдельно в [архивном отчёте v2](archive/VALIDATION-v2.md); её результаты не подтверждают нынешний OpenAI runtime.
+Рабочий путь: исходный файл → модель → готовое КП. Локальное извлечение текста, OCR, mapping колонок и резервные правила не вызываются. Старый отчёт v3 сохранён в `archive/VALIDATION-v3.md`.
 
-## Что подтверждено
+## Подтверждено кодом и тестами
 
-- `docker compose --env-file .env.example config --services` содержит только `backend`, `frontend`.
-- Подключение обоих архивных GPU/trained overlays также оставляет только `backend`, `frontend`; локальные model/vision сервисы не создаются.
-- Active Compose сохраняет `proposal_data` и парольные настройки; backend имеет исходящий HTTPS доступ. API ключ отсутствует в frontend environment.
-- Backend requirements не содержат Paddle, Torch, Transformers, llama.cpp, Tesseract или скачивания весов.
+88 тестов прошли: `test_model_document.py`, `test_request_schema.py`, `test_provider_errors.py`, `test_annotation_architecture.py`, `test_openai_transport.py`, `test_usage.py`, `test_universal.py`, `test_semantic_plan.py`.
 
-| Проверка | Результат | Что подтверждено |
-| --- | --- | --- |
-| Финальный полный pytest | 190 passed, 4 skipped; 15,89 s | Native parsers, mocked OpenAI transport/vision/semantic, numeric/Office images, evidence, API, annotation/export, очередь, reusable workers и quota errors. |
-| `npm run lint` | Успешна | Frontend static checks. |
-| `npm run build` | Успешна | Production TypeScript/Vite build; Windows subprocess запуск потребовал sandbox escalation. |
-| Основной Compose и архивные overlays | Успешны | Состав из двух сервисов, сохранение volume и API settings. |
-| `git diff --check` для deployment/docs | Успешна | Отсутствие whitespace ошибок в изменённых конфигурациях и документации. |
-| Playwright browser workflow с mocked API | Успешна | Параллельная загрузка, источники, PNG preview, отсутствующие данные, HTTP 503, timeout и отсутствие API key. |
-| HTTP route + настоящий subprocess + локальный Responses stand-in | Успешна | Upload проходит visual и semantic transport, evidence сохраняется, повторная загрузка даёт cache hit, proposal сохраняется и читается из SQLite. |
-| Финальный production Docker build и `up -d --remove-orphans` | Успешны; cached rebuild 8,7 s | Собран последний код с quota handling; запущены только frontend/backend, backend healthy, старый Qwen контейнер удалён из runtime. |
-| Production health/models и browser без API mocks | Успешны | Health/models возвращают 200, configured=true; начальный экран UI корректен, 0 console errors/warnings. |
-| Настоящий OpenAI API smoke | Ограничен HTTP 429 | Провайдер отвечает `credit_balance_exhausted`, type `insufficient_quota`: недостаточно средств/квоты проекта. Успешного live OCR нет. |
+- Оригинальные байты PDF/DOCX/XLSX/XLS/CSV/TSV/TXT/JSON передаются в mocked API без локального разбора. Для TSV используется `text/tsv`.
+- Все кадры TIFF передаются модели без OCR.
+- Проверены Responses JSON Schema, `store:false`, сохранение usage и ограничения вложенной схемы. Списки больше не допускают `null`; необязательные числовые поля сохраняют nullable-тип.
+- Ошибки провайдера и невалидный JSON отклоняются без fallback. Статус и безопасный код ошибки сохраняются между worker и HTTP-маршрутом.
+- TestClient: upload → модельный ответ → SQLite save/read и idempotency. Сетевой отказ возвращает 503 без proposal; ошибка документа — 422.
+- Отсутствующие числа не заполняются; арифметические проверки не меняют значения. Модельные цитаты не получают `verifiedInSource=true`; независимое покрытие не заявляется.
+- Новые документы разметки используют модельную транскрипцию. Проверены старые контракты разметки и отсутствие импорта legacy-парсеров при запуске приложения.
+- `npm run lint`, Python compileall и `git diff --check` прошли.
+- Production frontend и backend собраны и перезапущены Docker Compose с прежним volume базы.
 
-Skipped tests требуют явно включённого внешнего Vision runtime. Автотесты используют mocked API; live inference и OCR accuracy этим не подтверждаются. Финальный полный regression и production rebuild выполнены после quota-specific изменений.
+## Проверка интерфейса
 
-`backend/tests/test_openai_pipeline.py` выполняет настоящий backend upload route, reusable subprocess и HTTP transport к локальному synthetic Responses серверу. Это отличается от подмены frontend API, но не вызывает платный OpenAI и не оценивает качество модели. Дополнительно проверены `store: false`, порядок visual/semantic запросов, source evidence, cache reuse без дополнительных provider запросов и сохранение/чтение предложения.
+Chrome / Playwright, синтетический XLS и mocked API: полный отказ, частичный успех, успешный повтор. Проверены отсутствие пустой формы КП при полном отказе, отсутствие повторных предупреждений, повтор только неудачных файлов и сохранение ручного изменения названия. В консоли браузера — 0 ошибок и 0 предупреждений.
 
-Numeric regression проверяет, что искажённая цифра в synthetic OpenAI ответе относительно digital PDF не считается завершённым visual review. Сравнение состава цифр не измеряет OCR accuracy и не доказывает совпадение каждого числа/ячейки. Для API PDF native words сохраняются внутри backend, а canonical клетки на распознанных страницах остаются API transcription.
+Снимки desktop/mobile: `output/playwright/all-failed.png`, `output/playwright/all-failed-mobile.png`. Эти сценарии подтверждают поведение интерфейса, но не доступность внешнего API.
 
-В browser проверке исправлен сбой PNG preview при React StrictMode; отсутствующие item значения используют исходную позицию файла для различения `absent`/`unreadable`/`unverified`. Успешное чтение КП без извлекаемых данных показывает отсутствие данных, а не общий сбой. Скриншоты находятся в ignored `output/playwright/`: `openai-image-results.png`, `openai-api-error.png`, `openai-api-timeout.png`, `openai-not-configured.png`, `openai-no-data.png`.
+## Диагностика реального соединения
 
-Дополнительно начальный production UI `http://127.0.0.1:8080` проверен в чистой browser-сессии без перехвата API: `/api/session` и `/api/models` возвращают 200, карточка `OpenAI · gpt-5-mini` сообщает о настройке API, dropzone принимает изображения, исходный preview отсутствует до загрузки, console содержит 0 errors и 0 warnings. Скриншот: `output/playwright/actual-docker-initial.png`. Эта проверка подтверждает production UI и связь с backend, а не успешное чтение документа моделью.
+В Windows и Docker HTTPS к `api.openai.com` сбрасывается до получения HTTP-ответа. DNS возвращает адреса API; контрольный HTTPS-запрос к `example.com` возвращает 200. В Docker ошибка содержит `SSL: UNEXPECTED_EOF_WHILE_READING`; Windows curl возвращает `Recv failure: Connection was reset`. Ограничение TLS до 1.2 с обычной проверкой сертификата не устранило отказ. Проверка через прокси Docker также завершилась сбросом TLS.
 
-Mount подтверждён: `readdocument_proposal_data` -> `/data`; сохранённая база остаётся в прежнем volume. В одном idle snapshot backend занимал 64,66 MiB, frontend — 14,73 MiB. Это наблюдение после запуска, а не peak-memory или throughput benchmark. Локальные model services в active Docker отсутствуют.
+Пользователь сообщил, что VPN выключен. Проверенный основной маршрут Windows проходит через Wi-Fi. Установлен этап отказа — соединение до HTTP, но конкретный сетевой компонент, сбрасывающий его, не установлен. Ошибка не доказывает неверный ключ, квоту, содержимое файла или некорректный API payload. XLS поддерживается Responses API согласно [документации входных файлов](https://developers.openai.com/api/docs/guides/file-inputs).
 
-После финального rebuild health снова вернул 200 и `configured=true`. Реальная загрузка native КП через production HTTP API вернула 200 с явно частичным результатом: `outcome.state=partial`, `modelUsed=false`, `llmAttempted=true`, `reviewCompleted=false`, `cacheHit=false`. Предупреждение `insufficient_quota` предлагает проверить баланс, лимиты и проект. Исчерпанная квота не повторяется автоматически; такой непроверенный результат не записывается в cache как успешный review. Один diagnostic round trip занял около двух секунд; это ответ с ошибкой квоты, а не performance benchmark успешного OCR.
+Повтор диагностики без ключей и документов: `scripts/api_diagnostics.py`. Backend поддерживает отдельную настройку `OPENAI_PROXY_URL`; глобальные настройки сети не изменялись.
 
-## Границы подтверждения
+## Проверка развёрнутого приложения
 
-Ключ в `.env` присутствует; health показывает `configured=true`. Настоящие обращения к OpenAI выполнены, но получили HTTP 429 с `credit_balance_exhausted` / `insufficient_quota`. Поэтому причина незавершённого live smoke — недостаток средств/квоты проекта. Проверьте [OpenAI API billing](https://platform.openai.com/settings/organization/billing/), баланс, лимиты расходов и проект, которому принадлежит ключ. Исчерпанная квота определяется отдельно от временного rate limit и не вызывает автоматические повторы.
+После финальной сборки: backend health 200, `extractionMode=model_direct`, `localParsers=false`, `ruleFallback=false`; frontend HTTP 200. Реальная загрузка синтетического TXT через `/api/extract` вернула **503**, `error.code=api_tls_reset`, `error.stage=connection`, `error.retryable=true`. Резервный proposal не возвращался. Лог содержит безопасный код сбоя, без документа и ключа.
 
-Успешное live OCR и latency benchmark пока не получены. Mocked HTTP проверки и наличие settings не измеряют OCR accuracy, provider latency или применимые API rate limits. После восстановления квоты требуется live smoke с известными ожидаемыми значениями и сравнение на разнообразных human-reviewed КП.
+## Границы доказательств
 
-Сохранённая annotation/training data и предложения не удалялись. Локальные model directories и кеши сохранены как архив, без участия в active Compose.
+Успешное извлечение реальной моделью не подтверждено: сетевой сбой сохраняется. Синтетические ответы и MockTransport не измеряют качество модели на реальном корпусе. Health подтверждает конфигурацию, а не доступность API или качество извлечения.
+
+Старые тесты native/Plan/fallback-архитектуры сохранены; полный старый набор не заявляется как прошедший. `test_extraction.py` содержит устаревшую fixture с обращением к удалённому `pipeline.extract_universal`.
+
+Сервисная обработка Office ограничена: DOCX — текст без встроенных изображений; spreadsheets — первые 1000 строк листа. Оригинальный файл отправляется полностью, но это не доказывает полное чтение. Ограничения показаны в UI.

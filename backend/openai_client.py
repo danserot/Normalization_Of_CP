@@ -8,19 +8,38 @@ from __future__ import annotations
 from copy import deepcopy
 from email.utils import parsedate_to_datetime
 import json
+import logging
 import math
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 import httpx
 
 from .usage import record_usage
+from .errors import ProviderError
 
 
-class OpenAIError(ValueError):
+class OpenAIError(ProviderError):
     """A safe, actionable error without document text or credentials."""
+
+
+def connection_error(error):
+    """Classify transport failures without exposing request bodies or secrets."""
+    detail = str(error).upper()
+    if isinstance(error, httpx.TimeoutException):
+        return OpenAIError('Сервис не ответил вовремя. Повторите загрузку.',
+            code='api_timeout', http_status=504, stage='transport', retryable=True)
+    if 'UNEXPECTED_EOF' in detail or 'CONNECTION WAS RESET' in detail or 'CONNECTION RESET' in detail:
+        return OpenAIError('Защищённое соединение с сервисом обрывается. Проверьте VPN или доступ к API из вашей сети.',
+            code='api_tls_reset', http_status=503, stage='connection', retryable=True)
+    if 'CERTIFICATE_VERIFY_FAILED' in detail:
+        return OpenAIError('Не удалось проверить сертификат сервиса. Проверьте настройки сетевого прокси.',
+            code='api_certificate_error', http_status=503, stage='connection')
+    return OpenAIError('Нет соединения с сервисом распознавания. Проверьте подключение и повторите загрузку.',
+        code='api_connection_error', http_status=503, stage='connection', retryable=True)
 
 
 def _number(name: str, default: float, lower: float, upper: float) -> float:
@@ -45,16 +64,8 @@ def openai_configured() -> bool:
 
 
 def strict_schema(schema: dict) -> dict:
-    """Require all object keys, forbid extras, and make optionals nullable."""
+    """Require all keys without changing the declared value types/nullability."""
     normalized = deepcopy(schema)
-
-    def nullable(node):
-        kind = node.get('type')
-        if kind == 'null' or isinstance(kind, list) and 'null' in kind:
-            return node
-        if any(choice.get('type') == 'null' for choice in node.get('anyOf', [])):
-            return node
-        return {'anyOf': [node, {'type': 'null'}]}
 
     def visit(node):
         if not isinstance(node, dict):
@@ -63,13 +74,10 @@ def strict_schema(schema: dict) -> dict:
         node.pop('examples', None)
         if node.get('type') == 'object' or 'properties' in node:
             properties = node.setdefault('properties', {})
-            original_required = set(node.get('required', []))
             node['additionalProperties'] = False
             node['required'] = list(properties)
             for name, prop in list(properties.items()):
                 visit(prop)
-                if name not in original_required:
-                    properties[name] = nullable(prop)
         for key in ('$defs', 'definitions'):
             for definition in node.get(key, {}).values():
                 visit(definition)
@@ -147,8 +155,12 @@ class OpenAIResponsesClient:
             if self._semaphore is None:
                 self._semaphore = threading.BoundedSemaphore(setting_int('OPENAI_MAX_CONCURRENCY', 4, 1, 16))
             if self._client is None:
+                proxy = os.getenv('OPENAI_PROXY_URL', '').strip() or None
+                if proxy and urlsplit(proxy).scheme not in {'http', 'https'}:
+                    raise OpenAIError('Для OPENAI_PROXY_URL укажите HTTP или HTTPS прокси.',
+                        code='api_proxy_configuration', http_status=503, stage='configuration')
                 self._client = httpx.Client(
-                    trust_env=False, follow_redirects=False,
+                    trust_env=False, proxy=proxy, follow_redirects=False,
                     limits=httpx.Limits(max_connections=16, max_keepalive_connections=8,
                                        keepalive_expiry=60))
             return self._client, self._semaphore
@@ -163,7 +175,8 @@ class OpenAIResponsesClient:
                  model: str | None = None, schema_name: str = 'document_plan') -> str:
         key = os.getenv('OPENAI_API_KEY', '').strip()
         if not key:
-            raise OpenAIError('Сервис распознавания не настроен: укажите OPENAI_API_KEY в .env')
+            raise OpenAIError('Сервис распознавания не настроен: укажите OPENAI_API_KEY в .env',
+                code='api_not_configured', http_status=503, stage='configuration')
         if not math.isfinite(remaining) or remaining <= 0:
             raise OpenAIError('Истекло время обработки документа перед запросом сервис')
         budget = min(remaining, _number('OPENAI_TIMEOUT_SECONDS', 120., 1., 1800.))
@@ -195,7 +208,10 @@ class OpenAIResponsesClient:
                         timeout=httpx.Timeout(remaining_request, connect=min(10., remaining_request)))
                 except httpx.HTTPError as error:
                     record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
-                    raise OpenAIError('Не удалось связаться с Сервис распознавания (' + type(error).__name__ + ')') from None
+                    failure = connection_error(error)
+                    logging.getLogger(__name__).warning('api_transport_failure host=%s code=%s exception=%s',
+                        urlsplit(endpoint).hostname, failure.code, type(error).__name__)
+                    raise failure from None
                 if time.monotonic() >= deadline:
                     record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
                     raise OpenAIError('Истекло время обработки документа в сервис')
@@ -204,7 +220,8 @@ class OpenAIResponsesClient:
                     # backoff. Avoid repeated paid-call attempts and explain
                     # which configuration the user must correct.
                     raise OpenAIError('Сервис распознавания: недостаточно квоты проекта (insufficient_quota); '
-                                      'проверьте баланс, лимит расходов и проект API-ключа')
+                                      'проверьте баланс, лимит расходов и проект API-ключа',
+                                      code='api_quota_exhausted', http_status=503, stage='response')
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     if response.status_code >= 500:
                         # A server failure can happen after inference; do not
@@ -223,7 +240,13 @@ class OpenAIResponsesClient:
                     }
                     reason = descriptions.get(response.status_code, 'сервис временно недоступен'
                                               if response.status_code >= 500 else 'проверьте настройки запроса')
-                    raise OpenAIError(f'OpenAI API: HTTP {response.status_code}; {reason}')
+                    logging.getLogger(__name__).warning('api_http_failure status=%d host=%s',
+                        response.status_code, urlsplit(endpoint).hostname)
+                    raise OpenAIError(f'Сервис распознавания: HTTP {response.status_code}; {reason}',
+                        code='api_request_rejected' if response.status_code == 400 else 'api_http_error',
+                        http_status=429 if response.status_code == 429 else 502,
+                        stage='request' if response.status_code == 400 else 'response',
+                        retryable=response.status_code == 429 or response.status_code >= 500)
                 try:
                     data = response.json()
                     record_usage(data, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')

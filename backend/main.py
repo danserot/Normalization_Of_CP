@@ -14,14 +14,16 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .extraction import FORMATS, MAX_BYTES, DocumentError
+from .document_limits import FORMATS, MAX_BYTES, DocumentError
 from .openai_model import model_available
 from .openai_client import configured_model
-from .vision import vision_health
 from .pipeline import PipelinePool, QueueFullError
 from .annotations import create_annotation_router, initialize_annotations
+from .errors import ProviderError
+from .proposal_models import ProposalData
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "./backend/data/readdocument.sqlite3"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
@@ -30,53 +32,6 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SESSION_COOKIE = "readdocument_session"
 SESSION_LIFETIME = 8 * 60 * 60
 pipeline = PipelinePool()
-
-
-class AdditionalField(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    label: str = Field(max_length=200)
-    value: str = Field(max_length=2000)
-
-
-class CostComponent(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    label: str = Field(max_length=500)
-    unitPrice: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    lineTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-
-
-class ProposalItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=500)
-    quantity: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    unit: str = Field(max_length=50)
-    unitPrice: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    lineTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    components: list[CostComponent] = Field(default_factory=list, max_length=10)
-    componentMode: Literal['additive', 'alternative'] | None = None
-    additionalFields: list[AdditionalField] = Field(default_factory=list, max_length=30)
-
-
-class ProposalData(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(max_length=500)
-    client: str = Field(max_length=500)
-    clientContact: str = Field(max_length=500)
-    validUntil: str = Field(max_length=200)
-    supplier: str = Field(max_length=500)
-    currency: str = Field(max_length=30)
-    vat: str = Field(max_length=200)
-    discount: str = Field(max_length=200)
-    delivery: str = Field(max_length=500)
-    paymentTerms: str = Field(max_length=1000)
-    deliveryTerms: str = Field(max_length=1000)
-    warranty: str = Field(max_length=500)
-    documentNumber: str = Field(max_length=200)
-    documentDate: str = Field(max_length=200)
-    documentTotal: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    notes: str = Field(max_length=500_000)
-    items: list[ProposalItem] = Field(max_length=2000)
-    additionalFields: list[AdditionalField] = Field(default_factory=list, max_length=100)
 
 
 class ProposalSubmission(BaseModel):
@@ -154,20 +109,21 @@ app.include_router(create_annotation_router(connect_db, require_auth, pipeline))
 
 @app.get("/api/health")
 async def health() -> dict:
-    available, vision = await asyncio.gather(asyncio.to_thread(model_available), asyncio.to_thread(vision_health))
+    available = await asyncio.to_thread(model_available)
     return {"status": "ok", "database": "sqlite", "provider": "openai", "model": configured_model(),
             "configured": available, "device": "api", "apiConnectionVerified": False,
             "busy": pipeline.busy, "queued": max(0, pipeline.pending - pipeline.active),
             "workers": len(pipeline.workers), "active": pipeline.active,
-            "queueLimit": pipeline.max_pending, "vision": vision,
-            "architecture": "openai-vision-source-grounded-v3"}
+            "queueLimit": pipeline.max_pending, "extractionMode": "model_direct",
+            "localParsers": False, "ruleFallback": False,
+            "architecture": "model-direct-v4"}
 
 
 @app.get("/api/models")
 async def get_models(_: None = Depends(require_auth)) -> dict:
     configured = await asyncio.to_thread(model_available)
     return {"models": [{"id": "openai", "name": configured_model(),
-        "description": "Чтение изображений и PDF, определение полей КП. Значения проверяются по исходному тексту; отсутствующие сведения остаются пустыми.",
+        "description": "Исходный файл читает модель и возвращает готовое КП. Python проверяет формат и арифметику. Значения и цитаты требуют сверки с оригиналом.",
         "size": "API · без локальных моделей", "recommended": True,
         "configured": configured, "installed": configured}]}
 
@@ -224,6 +180,9 @@ async def extract(file: UploadFile = File(...), models: str = Form(default=""), 
         return await pipeline.run(content, filename)
     except QueueFullError as error:
         raise HTTPException(status_code=429, detail=str(error), headers={"Retry-After": "5"}) from error
+    except ProviderError as error:
+        return JSONResponse(status_code=error.http_status,
+            content={"detail": str(error), "error": error.public_info()})
     except DocumentError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     finally:

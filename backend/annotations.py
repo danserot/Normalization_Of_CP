@@ -9,12 +9,12 @@ from urllib.parse import quote
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
-import fitz
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from .annotation_data import Annotation, SaveAnnotation, group_split, plan_training_examples, training_examples, validate_annotation
-from .extraction import FORMATS, MAX_BYTES, DocumentError
+from .document_limits import FORMATS, MAX_BYTES, DocumentError
+from .errors import ProviderError
 from .pipeline import QueueFullError
 
 
@@ -72,6 +72,9 @@ def create_annotation_router(connect_db, require_auth, pipeline):
                 payload = await pipeline.run(content, filename, mode='annotation')
             except QueueFullError as error:
                 raise HTTPException(429, str(error), headers={'Retry-After': '5'}) from error
+            except ProviderError as error:
+                return JSONResponse(status_code=error.http_status,
+                                    content={'detail': str(error), 'error': error.public_info()})
             except DocumentError as error:
                 raise HTTPException(422, str(error)) from error
             annotation = payload.pop('annotation')
@@ -187,6 +190,9 @@ def create_annotation_router(connect_db, require_auth, pipeline):
     def render_image(row, page):
         preview = json.loads(row['payload'])['preview']
         if preview['kind'] == 'pdf':
+            # Rendering previews is separate from model-only extraction.
+            import fitz
+
             if not 1 <= page <= preview['pages']:
                 raise HTTPException(404, 'Страница не найдена')
             with fitz.open(stream=bytes(row['original']), filetype='pdf') as pdf:

@@ -13,11 +13,9 @@ from pathlib import Path
 
 import psutil
 
-from .extraction import DEADLINE, DocumentError, read_document
-from .universal import extract_universal
-from .rules import FIELDS, validate
-from .outcome import extraction_outcome
-from .usage import reset_usage, usage_summary
+from .canonical import DEADLINE, DocumentError
+from .errors import ProviderError
+from .model_document import extract_model_document
 
 
 class QueueFullError(DocumentError):
@@ -25,71 +23,7 @@ class QueueFullError(DocumentError):
 
 
 def process_document(content, filename):
-    reset_usage()
-    started = time.perf_counter()
-    source = read_document(content, filename)
-    read_ms = round((time.perf_counter() - started) * 1000)
-    model_started = time.perf_counter()
-    result, verification = extract_universal(source, content, filename)
-    routing = getattr(source, 'routing', {})
-    verification['visionUsed'] = routing.get('used', False)
-    verification['visionRequired'] = routing.get('mandatory', False)
-    verification['visionStatus'] = routing.get('status', 'native')
-    verification['visionComplete'] = bool(routing.get('available', False)
-                                      and routing.get('status') == 'vision'
-                                      and not routing.get('issues'))
-    if routing.get('embeddedImagesReviewRequired'):
-        verification.update(embeddedImagesReviewRequired=True, coverageComplete=False)
-    if routing.get('mandatory') and (not routing.get('available') or routing.get('status') != 'vision'
-                                    or routing.get('issues')):
-        verification.update(coverageComplete=False, reviewCompleted=False)
-    model_ms = round((time.perf_counter() - model_started) * 1000)
-    llm_calls = verification.get('llmCalls', 0)
-    model_used = llm_calls > 0 and verification.get('mode') == 'model'
-    if result is not None:
-        proposal, proof, warnings, used_rows = result
-    else:
-        proposal = {key: '' for key in FIELDS}
-        proposal.update(documentTotal=None, notes='', items=[], additionalFields=[])
-        proof, warnings, used_rows = {}, list(source.warnings), set()
-    warnings.extend(verification['issues'])
-    validation_started = time.perf_counter()
-    validate(proposal, proof, warnings)
-    validation_ms = round((time.perf_counter() - validation_started) * 1000)
-    outcome = extraction_outcome(proposal, verification)
-    if outcome['state'] != 'complete':
-        warnings.insert(0, outcome['message'])
-    total_ms = round((time.perf_counter() - started) * 1000)
-    stage_timings = routing.get('timingsMs', {})
-    logging.getLogger(__name__).info(
-        'extraction_complete format=%s bytes=%d blocks=%d tables=%d cells=%d llm_calls=%d llm_ms=%d total_ms=%d warnings=%d fallback=%s',
-        Path(filename).suffix.lower(), len(content), len({cell.block for cell in source.cells}),
-        source.tables, len(source.cells), llm_calls, model_ms if model_used else 0, total_ms,
-        len(warnings), verification.get('mode'))
-    return {'proposal': proposal, 'metadata': {
-        'sourceName': filename, 'apiUsage': usage_summary(),
-        'parser': ('Визуальное чтение' if routing.get('used') else 'Исходные ячейки документа')
-                  + (' + структура КП' if model_used else '') + ' + проверка источников',
-        'status': 'empty' if outcome['state'] == 'unavailable' else 'parsed',
-        'outcome': outcome,
-        'timingsMs': {'read': read_ms, 'parsing': stage_timings.get('native', read_ms), 'normalization': 0,
-                      'render': stage_timings.get('render', 0), 'vision': stage_timings.get('vision', 0),
-                      'fusion': stage_timings.get('fusion', 0),
-                      'semantic': model_ms if not model_used else 0, 'model': model_ms,
-                      'llm': model_ms if llm_calls else 0, 'validation': validation_ms,
-                      'total': total_ms},
-        'confidence': round(min((e['confidence'] for e in proof.values() if isinstance(e, dict)), default=0), 2),
-        'confidenceMethod': 'heuristic-source-structure-arithmetic',
-        'warnings': list(dict.fromkeys(warnings)), 'fieldEvidence': proof,
-        'sourceCells': source.public(), 'modelUsed': model_used, 'llmAttempted': llm_calls > 0, 'llmCalls': llm_calls,
-        'architectureVersion': 3, 'provider': 'openai', 'routing': routing,
-        'canonicalDocument': source.structure() if hasattr(source, 'structure') else {},
-        'documentStats': {'bytes': len(content), 'format': Path(filename).suffix.lower(),
-                          'blocks': len({cell.block for cell in source.cells}),
-                          'tables': source.tables, 'cells': len(source.cells), 'pages': source.pages,
-                          'nativeWords': len(getattr(source, 'native_words', []))},
-        'verification': verification,
-    }}
+    return extract_model_document(content, filename)
 
 
 def worker(connection):
@@ -106,7 +40,7 @@ def worker(connection):
                 result = process_document(content, filename)
             connection.send(('ok', result))
         except DocumentError as error:
-            connection.send(('error', str(error)))
+            connection.send(('error', error.worker_payload() if isinstance(error, ProviderError) else str(error)))
         except Exception as error:
             suffix = Path(filename).suffix.upper().lstrip('.')
             # Keep diagnostic frames, without exception text or document contents.
@@ -136,17 +70,12 @@ class Pipeline:
     def _cache_key(content, filename, mode):
         digest = hashlib.sha256(content).hexdigest()
         config = {name: os.getenv(name, '') for name in (
-            'LOCAL_MODEL_ENABLED', 'LOCAL_MODEL_NAME', 'LOCAL_MODEL_ID', 'LOCAL_MODEL_URL',
-            'SEMANTIC_MODEL_MODE', 'SEMANTIC_MODE', 'SEMANTIC_MODEL_URL', 'SEMANTIC_MODEL_ID',
-            'SEMANTIC_MODEL_NAME', 'SEMANTIC_MODEL_ENABLED', 'SEMANTIC_CONTEXT_CHARS',
-            'VISION_ENABLED', 'VISION_SERVICE_URL', 'VISION_RENDER_DPI',
-            'VISION_MAX_SIDE', 'VISION_MAX_PAGES', 'VISION_PDF_MODE',
-            'OPENAI_MODEL', 'OPENAI_VISION_MODEL', 'OPENAI_API_URL',
-            'OPENAI_REASONING_EFFORT', 'OPENAI_VISION_MAX_OUTPUT_TOKENS',
-            'SEMANTIC_MAX_OUTPUT_TOKENS')}
+            'OPENAI_MODEL', 'OPENAI_API_URL', 'OPENAI_PROXY_URL',
+            'OPENAI_REASONING_EFFORT', 'MODEL_DOCUMENT_MAX_OUTPUT_TOKENS',
+            'VISION_MAX_PAGES')}
         config['keyFingerprint'] = hashlib.sha256(os.getenv('OPENAI_API_KEY', '').encode()).hexdigest()
         signature = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
-        return f'v3:{mode}:{filename}:{signature}:{digest}'
+        return f'v4:{mode}:{filename}:{signature}:{digest}'
 
     def _cache_get(self, key):
         entry = self._cache.get(key)
@@ -175,6 +104,8 @@ class Pipeline:
     def _cacheable(result):
         metadata = result.get('metadata', {})
         verification = metadata.get('verification', {})
+        if verification.get('mode') == 'model_direct':
+            return metadata.get('cacheEligible') is True
         # Legitimately absent requisites are not a reason to repeat inference.
         # Never retain unavailable/unfinished model or mandatory visual review.
         return (metadata.get('outcome', {}).get('state') != 'unavailable'
@@ -244,6 +175,9 @@ class Pipeline:
                 self.stop()
                 raise DocumentError('Обработка остановлена: превышено время получения результата') from error
             if status != 'ok':
+                if isinstance(result, dict):
+                    message = result.pop('message')
+                    raise ProviderError(message, **result)
                 raise DocumentError(result)
             if mode == 'extract' and self._cacheable(result):
                 self._cache_put(key, result)

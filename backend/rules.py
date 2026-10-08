@@ -6,6 +6,8 @@ from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from .semantic import FIELD_ALIASES, classify_label, normalize_label
+from .numeric_values import parse_number
+from .source_catalog import grouped_rows
 
 FIELDS = {
     'title': ['название', 'тема', 'title'],
@@ -27,40 +29,6 @@ HEADERS = FIELD_ALIASES
 
 def normalized(value):
     return normalize_label(value)
-
-
-def parse_number(value):
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value) if math.isfinite(value) else None
-    raw = str(value).strip()
-    raw = re.sub(r'(?i)(?:RUB|USD|EUR|KZT|TRY|руб\.?|тенге|тг\.?|₽|₸|\$|€)', '', raw).strip()
-    # A number must occupy the entire cell. Never turn a date or SKU into money.
-    if not re.fullmatch(r'[+-]?\d[\d\s\u00a0\u202f.,]*', raw):
-        return None
-    if re.search(r'\d[\s\u00a0\u202f]+\d', raw) and not re.fullmatch(r'[+-]?\d{1,3}(?:[\s\u00a0\u202f]+\d{3})+(?:[,.]\d{1,2})?', raw):
-        return None
-    raw = re.sub(r'[\s\u00a0\u202f]', '', raw)
-    if ',' in raw and '.' in raw:
-        decimal = ',' if raw.rfind(',') > raw.rfind('.') else '.'
-        thousands = '.' if decimal == ',' else ','
-        whole, fraction = raw.rsplit(decimal, 1)
-        if not re.fullmatch(r'[+-]?\d{1,3}(?:' + re.escape(thousands) + r'\d{3})+', whole) or len(fraction) not in (1, 2):
-            return None
-        raw = whole.replace(thousands, '') + '.' + fraction
-    elif ',' in raw or '.' in raw:
-        sep = ',' if ',' in raw else '.'
-        parts = raw.split(sep)
-        # 1,234 / 1.234 could be a decimal or a thousands group: ask a human.
-        if len(parts) != 2 or len(parts[1]) not in (1, 2):
-            return None
-        raw = raw.replace(',', '.')
-    try:
-        result = float(Decimal(raw))
-        return result if math.isfinite(result) else None
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def evidence(cell, value, method='rule', warning=None):
@@ -86,13 +54,6 @@ def evidence(cell, value, method='rule', warning=None):
             'confidence': round(min(.99, max(0, confidence)), 3),
             'confidenceKind': 'heuristic', 'confidenceBasis': basis,
             'warning': warning}
-
-
-def grouped_rows(source):
-    rows = defaultdict(list)
-    for cell in source.cells:
-        rows[(cell.block, cell.row)].append(cell)
-    return rows
 
 
 def alternative_blocks(source, tables=()):
