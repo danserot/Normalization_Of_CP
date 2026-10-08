@@ -163,9 +163,9 @@ class OpenAIResponsesClient:
                  model: str | None = None, schema_name: str = 'document_plan') -> str:
         key = os.getenv('OPENAI_API_KEY', '').strip()
         if not key:
-            raise OpenAIError('OpenAI API не настроен: укажите OPENAI_API_KEY в .env')
+            raise OpenAIError('Сервис распознавания не настроен: укажите OPENAI_API_KEY в .env')
         if not math.isfinite(remaining) or remaining <= 0:
-            raise OpenAIError('Истекло время обработки документа перед запросом OpenAI')
+            raise OpenAIError('Истекло время обработки документа перед запросом сервис')
         budget = min(remaining, _number('OPENAI_TIMEOUT_SECONDS', 120., 1., 1800.))
         deadline = time.monotonic() + budget
         base_url = (os.getenv('OPENAI_API_URL', '').strip() or 'https://api.openai.com/v1').rstrip('/')
@@ -182,28 +182,28 @@ class OpenAIResponsesClient:
                 payload['reasoning'] = {'effort': effort}
         client, semaphore = self._resources()
         if not semaphore.acquire(timeout=max(0., deadline - time.monotonic())):
-            raise OpenAIError('Истекло время ожидания свободного запроса OpenAI')
+            raise OpenAIError('Истекло время ожидания свободного запроса сервис')
         try:
             retries = setting_int('OPENAI_MAX_RETRIES', 2, 0, 4)
             for attempt in range(retries + 1):
                 remaining_request = deadline - time.monotonic()
                 if remaining_request <= 0:
-                    raise OpenAIError('Истекло время обработки документа в OpenAI')
+                    raise OpenAIError('Истекло время обработки документа в сервис')
                 try:
                     response = client.post(endpoint, json=payload,
                         headers={'Authorization': 'Bearer ' + key},
                         timeout=httpx.Timeout(remaining_request, connect=min(10., remaining_request)))
                 except httpx.HTTPError as error:
                     record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
-                    raise OpenAIError('Не удалось связаться с OpenAI API (' + type(error).__name__ + ')') from None
+                    raise OpenAIError('Не удалось связаться с Сервис распознавания (' + type(error).__name__ + ')') from None
                 if time.monotonic() >= deadline:
                     record_usage({}, payload['model'], 'vision' if schema_name == 'document_page' else 'semantic')
-                    raise OpenAIError('Истекло время обработки документа в OpenAI')
+                    raise OpenAIError('Истекло время обработки документа в сервис')
                 if response.status_code == 429 and _quota_exhausted(response):
                     # A depleted balance/project quota cannot recover with
                     # backoff. Avoid repeated paid-call attempts and explain
                     # which configuration the user must correct.
-                    raise OpenAIError('OpenAI API: недостаточно квоты проекта (insufficient_quota); '
+                    raise OpenAIError('Сервис распознавания: недостаточно квоты проекта (insufficient_quota); '
                                       'проверьте баланс, лимит расходов и проект API-ключа')
                 if response.status_code == 429 or 500 <= response.status_code < 600:
                     if response.status_code >= 500:
@@ -230,25 +230,25 @@ class OpenAIResponsesClient:
                     output = data.get('output', [])
                     if any(part.get('type') == 'refusal' for item in output
                            for part in item.get('content', [])):
-                        raise OpenAIError('OpenAI отказался распознавать документ; требуется ручная проверка')
+                        raise OpenAIError('сервис отказался распознавать документ; требуется ручная проверка')
                     if data.get('status') == 'incomplete':
-                        raise OpenAIError('Ответ OpenAI обрезан (truncated); сократите документ или увеличьте лимит ответа')
+                        raise OpenAIError('Ответ сервис обрезан (truncated); сократите документ или увеличьте лимит ответа')
                     if data.get('status') != 'completed':
-                        raise OpenAIError('OpenAI не завершил обработку документа')
+                        raise OpenAIError('сервис не завершил обработку документа')
                     content = ''.join(part.get('text', '') for item in output
                                       if item.get('type') == 'message' and item.get('role') == 'assistant'
                                       for part in item.get('content', []) if part.get('type') == 'output_text')
                     if not content.strip():
-                        raise OpenAIError('OpenAI вернул пустой ответ; требуется ручная проверка')
+                        raise OpenAIError('сервис вернул пустой ответ; требуется ручная проверка')
                     parsed = json.loads(content)
                     if not isinstance(parsed, dict):
-                        raise OpenAIError('OpenAI вернул некорректную структуру документа')
+                        raise OpenAIError('сервис вернул некорректную структуру документа')
                     return json.dumps(_restore_defaults(parsed, schema, schema), ensure_ascii=False)
                 except (ValueError, TypeError, KeyError, AttributeError) as error:
                     if isinstance(error, OpenAIError):
                         raise
-                    raise OpenAIError('OpenAI вернул некорректный JSON; требуется ручная проверка') from None
-            raise OpenAIError('OpenAI API временно недоступен')
+                    raise OpenAIError('сервис вернул некорректный JSON; требуется ручная проверка') from None
+            raise OpenAIError('Сервис распознавания временно недоступен')
         finally:
             semaphore.release()
 

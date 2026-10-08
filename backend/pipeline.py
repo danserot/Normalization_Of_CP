@@ -68,8 +68,8 @@ def process_document(content, filename):
         len(warnings), verification.get('mode'))
     return {'proposal': proposal, 'metadata': {
         'sourceName': filename, 'apiUsage': usage_summary(),
-        'parser': ('OpenAI Vision' if routing.get('used') else 'Исходные ячейки документа')
-                  + (' + OpenAI: структура КП' if model_used else '') + ' + проверка источников',
+        'parser': ('Визуальное чтение' if routing.get('used') else 'Исходные ячейки документа')
+                  + (' + структура КП' if model_used else '') + ' + проверка источников',
         'status': 'empty' if outcome['state'] == 'unavailable' else 'parsed',
         'outcome': outcome,
         'timingsMs': {'read': read_ms, 'parsing': stage_timings.get('native', read_ms), 'normalization': 0,

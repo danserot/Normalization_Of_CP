@@ -54,7 +54,7 @@ export const parseWithExtractionApi = async (
     });
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === "TimeoutError")
-      throw new Error("Время ожидания OpenAI API истекло. Повторите чтение документа.", { cause });
+      throw new Error("Время ожидания распознавания истекло. Повторите чтение документа.", { cause });
     throw new Error("Не удалось связаться с сервером распознавания. Проверьте подключение и повторите чтение.", { cause });
   }
   if (!response.ok) {

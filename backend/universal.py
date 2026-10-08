@@ -309,7 +309,7 @@ def request_object(source, payload, schema, system, max_tokens=600):
         raise DocumentError('Недостаточно времени для проверки моделью; результат требует ручной проверки')
     content = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
     if len(content) > int(os.getenv('SEMANTIC_CONTEXT_CHARS', os.getenv('SEMANTIC_CONTEXT_CHAR_LIMIT', '60000'))):
-        raise DocumentError('Документ превышает лимит контекста OpenAI; проверка не завершена')
+        raise DocumentError('Документ превышает лимит контекста сервис; проверка не завершена')
     messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
     result = semantic_model.generate(messages, inference_schema(schema, payload),
                                      max_tokens=max_tokens, remaining=remaining)
@@ -644,14 +644,14 @@ def extract_universal(source, content, filename):
         return deterministic, report
     if not model_available():
         if deterministic[0]['items'] or deterministic[1]:
-            deterministic[2].append('OpenAI API недоступен; доступны только значения из исходных ячеек, смысловая проверка не завершена')
+            deterministic[2].append('Сервис распознавания недоступен; доступны только значения из исходных ячеек, смысловая проверка не завершена')
             return deterministic, {**report, 'mode': 'rules_fallback',
                 'reviewCompleted': False,
                 'coverageComplete': bool(deterministic[0]['items']) and not uncovered and not required_vision_missing,
                 'items': len(deterministic[0]['items']), 'tables': source.tables}
         return None, {**report, 'mode': 'model_error',
             'reviewCompleted': False,
-            'issues': ['OpenAI API не настроен; задайте OPENAI_API_KEY на сервере']}
+            'issues': ['Сервис распознавания не настроен; задайте OPENAI_API_KEY на сервере']}
     data = plan_payload(source)
     try:
         report.update(mode='model', llmCalls=1)

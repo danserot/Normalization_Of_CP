@@ -219,7 +219,7 @@ def read_pdf(source, content):
             return
         if not enabled:
             source.routing.update(available=False, status='fallback')
-            issue = 'Чтение PDF через OpenAI отключено; текстовый слой сохранён для проверки'
+            issue = 'Чтение PDF через сервис отключено; текстовый слой сохранён для проверки'
             source.routing['issues'].append(issue)
             source.warnings.append(issue)
         else:
@@ -246,7 +246,7 @@ def read_pdf(source, content):
                     # Transport errors are sanitized by the service boundary;
                     # keep their class visible without exposing source content.
                     source.routing['error'] = result.error
-                    issue = 'OpenAI не завершил чтение PDF; доступный текст сохранён, документ требует проверки'
+                    issue = 'сервис не завершил чтение PDF; доступный текст сохранён, документ требует проверки'
                     source.routing['issues'].append(issue)
                     source.warnings.append(issue)
             except (RuntimeError, OSError, ValueError) as error:
@@ -314,7 +314,7 @@ def read_images(source, images):
     missing = sorted(set(requested) - set(source.routing['processed_pages']))
     if not result.available or missing:
         source.routing.update(status='limited' if source.routing['used'] else 'fallback', error=result.error)
-        issue = 'OpenAI не завершил чтение изображений; часть данных не удалось прочитать'
+        issue = 'сервис не завершил чтение изображений; часть данных не удалось прочитать'
         source.routing['issues'].append(issue)
         source.warnings.append(issue)
 

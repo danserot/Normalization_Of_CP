@@ -22,9 +22,13 @@ const sourceCellDescription = (cell: SourceCell): string =>
     cell.id,
     sourceMethodLabel(cell.source_method || cell.method),
     cell.page ? `стр. ${cell.page}` : "",
-    cell.bbox ? `область [${cell.bbox.map((value) => Math.round(value)).join(", ")}]` : "",
+    cell.bbox ?
+      `область [${cell.bbox.map((value) => Math.round(value)).join(", ")}]`
+    : "",
     cell.vision_agreement === false ? "визуальный текст отличается" : "",
-  ].filter(Boolean).join(" · ");
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 const labels: Record<string, string> = {
   title: "Название КП",
@@ -359,9 +363,7 @@ export default function AnnotationWorkspace({
     setError("");
     try {
       await exportAnnotations();
-      setNotice(
-        "Проверенные документы и разметка выгружены в архив.",
-      );
+      setNotice("Проверенные документы и разметка выгружены в архив.");
     } catch (cause) {
       setError(message(cause));
     } finally {
@@ -488,8 +490,8 @@ export default function AnnotationWorkspace({
               <li>На последнем шаге сохраните проверенный результат.</li>
             </ol>
             <p>
-              Ошибки чтения сначала исправьте в исходном документе и загрузите его
-              заново. Не размечайте выдуманные значения.
+              Ошибки чтения сначала исправьте в исходном документе и загрузите
+              его заново. Не размечайте выдуманные значения.
             </p>
           </details>
         </aside>
@@ -516,7 +518,8 @@ export default function AnnotationWorkspace({
               <h2>Каждый КП — один проверенный документ</h2>
               <p>
                 Добавьте файлы или откройте сохранённый черновик. Вы отмечаете
-                правильные ответы и связываете их с исходными ячейками документа.
+                правильные ответы и связываете их с исходными ячейками
+                документа.
               </p>
               <button
                 className="primary-cta"
@@ -561,17 +564,22 @@ export default function AnnotationWorkspace({
               )}
               {doc.automation?.quarantined && (
                 <div className="validation-box" role="status">
-                  Документ требует проверки. Не удалось надёжно извлечь или подтвердить часть данных.
+                  Документ требует проверки. Не удалось надёжно извлечь или
+                  подтвердить часть данных.
                 </div>
               )}
-              {doc.automation && !doc.automation.quarantined && doc.status !== "reviewed" && (
-                <div className="annotation-hint" role="status">
-                  {doc.automation.status === "auto_validated"
-                    ? "Авторазметка прошла программные проверки. Проверка человеком ещё не выполнена."
-                    : "Авторазметка требует проверки. Причины указаны в предупреждениях документа."}
-                  {doc.automation.split === "test" && " Это документ отдельного тестового набора."}
-                </div>
-              )}
+              {doc.automation &&
+                !doc.automation.quarantined &&
+                doc.status !== "reviewed" && (
+                  <div className="annotation-hint" role="status">
+                    {doc.automation.status === "auto_validated" ?
+                      "Авторазметка прошла программные проверки. Проверка человеком ещё не выполнена."
+                    : "Авторазметка требует проверки. Причины указаны в предупреждениях документа."
+                    }
+                    {doc.automation.split === "test" &&
+                      " Это документ отдельного тестового набора."}
+                  </div>
+                )}
               <nav
                 className="annotation-wizard-steps"
                 aria-label="Этапы разметки">
@@ -905,8 +913,14 @@ export default function AnnotationWorkspace({
                         )}
                         {doc.routing && (
                           <p className="annotation-hint">
-                            Структура: {doc.routing.used ? "визуальное чтение через OpenAI API" : "исходные ячейки и текст файла"}
-                            {doc.routing.mandatory && !doc.routing.used ? "; визуальная проверка не завершена" : ""}.
+                            Структура:{" "}
+                            {doc.routing.used ?
+                              "визуальное чтение"
+                            : "исходные ячейки и текст файла"}
+                            {doc.routing.mandatory && !doc.routing.used ?
+                              "; визуальная проверка не завершена"
+                            : ""}
+                            .
                           </p>
                         )}
                       </section>
@@ -1218,9 +1232,19 @@ function TableEditor({
             Как связаны стоимости?
             <select
               value={table.componentMode ?? "additive"}
-              onChange={(event) => change({ componentMode: event.target.value as "additive" | "alternative" })}>
-              <option value="additive">Части одной цены: оборудование, монтаж, доставка</option>
-              <option value="alternative">Альтернативные варианты — не складывать</option>
+              onChange={(event) =>
+                change({
+                  componentMode: event.target.value as
+                    | "additive"
+                    | "alternative",
+                })
+              }>
+              <option value="additive">
+                Части одной цены: оборудование, монтаж, доставка
+              </option>
+              <option value="alternative">
+                Альтернативные варианты — не складывать
+              </option>
             </select>
           </label>
           {table.components.map((component, index) => (
@@ -1389,8 +1413,8 @@ function DocumentPreview({
     return (
       <>
         <p className="annotation-preview-caption">
-          DOCX: текст и таблицы. Разбивка страниц и
-          оформление могут отличаться от Word.
+          DOCX: текст и таблицы. Разбивка страниц и оформление могут отличаться
+          от Word.
         </p>
         <iframe
           className="annotation-word-preview"
@@ -1618,8 +1642,9 @@ function SourceBrowser({
       <p className="annotation-hint">
         {location?.sheet ? `Лист: ${location.sheet} · ` : ""}
         {location?.page ? `Страница: ${location.page} · ` : ""}
-        {isTableBlock ? `Таблица · строк: ${rows.length} · колонок: ${width}` :
-          `Текстовый блок · строк: ${rows.length}`}
+        {isTableBlock ?
+          `Таблица · строк: ${rows.length} · колонок: ${width}`
+        : `Текстовый блок · строк: ${rows.length}`}
       </p>
       {!cells.length ?
         <p className="annotation-preview-caption">
@@ -1667,7 +1692,12 @@ function SourceBrowser({
                                 onClick={() => onChoose(cell)}>
                                 <small>
                                   {cell.id}
-                                  {cell.source_method?.includes("vision") || cell.method === "paddleocr-vl" ? " · визуально" : ""}
+                                  {(
+                                    cell.source_method?.includes("vision") ||
+                                    cell.method === "paddleocr-vl"
+                                  ) ?
+                                    " · визуально"
+                                  : ""}
                                 </small>
                                 {cell.text || "—"}
                               </button>)}
@@ -1681,7 +1711,10 @@ function SourceBrowser({
         </div>
       : <div className="annotation-source-text" role="list">
           {rows.slice(pageOffset, pageOffset + 100).map(([row, entries]) => (
-            <div className="annotation-source-text-row" role="listitem" key={row}>
+            <div
+              className="annotation-source-text-row"
+              role="listitem"
+              key={row}>
               <small>Строка {row}</small>
               <div>
                 {entries
@@ -1696,7 +1729,13 @@ function SourceBrowser({
                         title={sourceCellDescription(cell)}
                         onClick={() => onChoose(cell)}>
                         <small>
-                          {cell.id}{cell.source_method?.includes("vision") || cell.method === "paddleocr-vl" ? " · визуально" : ""}
+                          {cell.id}
+                          {(
+                            cell.source_method?.includes("vision") ||
+                            cell.method === "paddleocr-vl"
+                          ) ?
+                            " · визуально"
+                          : ""}
                         </small>
                         {cell.text || "—"}
                       </button>,

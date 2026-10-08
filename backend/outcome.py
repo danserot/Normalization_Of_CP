@@ -32,7 +32,7 @@ def extraction_outcome(proposal, verification):
     if verification.get('semanticReviewRequired'):
         unavailable.append({'field': 'semanticReview', 'label': 'Проверка смысловых ролей и конфликтов', 'reason': 'unverified'})
     elif not reviewed:
-        unavailable.append({'field': 'semanticReview', 'label': 'Проверка данных через OpenAI не завершена', 'reason': 'unverified'})
+        unavailable.append({'field': 'semanticReview', 'label': 'Проверка данных через сервис не завершена', 'reason': 'unverified'})
     if verification.get('embeddedImagesReviewRequired'):
         unavailable.append({'field': 'embeddedImages', 'label': 'Встроенные изображения XLS', 'reason': 'unverified'})
     if verification.get('coverageComplete') is False and not verification.get('unclaimedRows'):

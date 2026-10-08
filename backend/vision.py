@@ -141,7 +141,7 @@ class PaddleOCRVisionService:
 
     def initialize(self):
         if self._pipeline is None:
-            raise ValueError('Local vision runtime removed; use OpenAIDocumentVisionService')
+            raise ValueError('Local vision runtime removed; use сервисDocumentVisionService')
 
     def analyze_pages(self, pages: list[RenderedPage]) -> VisionResult:
         if not pages:
@@ -212,19 +212,19 @@ TRANSCRIPTION_SYSTEM = (
 
 def _normalize_openai_page(payload, page: RenderedPage):
     if not isinstance(payload, dict) or type(payload.get('page')) is not int or payload['page'] != page.page:
-        raise OpenAIError('OpenAI вернул другую страницу документа; требуется повторная проверка')
+        raise OpenAIError('сервис вернул другую страницу документа; требуется повторная проверка')
     if set(payload) != set(PAGE_SCHEMA['properties']):
-        raise OpenAIError('OpenAI вернул некорректную структуру страницы')
+        raise OpenAIError('сервис вернул некорректную структуру страницы')
     complete, blank = payload['complete'], payload['blank']
     if type(complete) is not bool or type(blank) is not bool:
-        raise OpenAIError('OpenAI вернул некорректный статус страницы')
+        raise OpenAIError('сервис вернул некорректный статус страницы')
     raw_blocks, warnings = payload['blocks'], payload['warnings']
     if (not isinstance(raw_blocks, list) or len(raw_blocks) > 1000
             or not isinstance(warnings, list) or len(warnings) > 30
             or any(not isinstance(value, str) or len(value) > 2000 for value in warnings)):
-        raise OpenAIError('Ответ OpenAI превышает лимит структуры страницы')
+        raise OpenAIError('Ответ сервис превышает лимит структуры страницы')
     if blank and (raw_blocks or not complete or warnings):
-        raise OpenAIError('OpenAI вернул противоречивый статус пустой страницы')
+        raise OpenAIError('сервис вернул противоречивый статус пустой страницы')
     output = VisionPage(page.page, complete=complete, blank=blank, source_method='openai-vision')
     characters = 0
     valid_types = PAGE_SCHEMA['properties']['blocks']['items']['properties']['type']['enum']
@@ -232,18 +232,18 @@ def _normalize_openai_page(payload, page: RenderedPage):
         if (not isinstance(block, dict) or set(block) != {'type', 'text', 'html'}
                 or block['type'] not in valid_types
                 or not isinstance(block['text'], str) or not isinstance(block['html'], str)):
-            raise OpenAIError('OpenAI вернул некорректный блок страницы')
+            raise OpenAIError('сервис вернул некорректный блок страницы')
         characters += len(block['text']) + len(block['html'])
         if characters > MAX_CHARS:
             raise OpenAIError('Распознанная страница превышает лимит текста документа')
         if block['type'] == 'table':
             if block['text'].strip() or not block['html'].strip():
-                raise OpenAIError('OpenAI вернул таблицу без структуры ячеек')
+                raise OpenAIError('сервис вернул таблицу без структуры ячеек')
             from .fusion import parse_table_html
             if not parse_table_html(block['html']):
-                raise OpenAIError('OpenAI вернул пустую структуру таблицы')
+                raise OpenAIError('сервис вернул пустую структуру таблицы')
         elif block['html'].strip():
-            raise OpenAIError('OpenAI вернул HTML вне таблицы')
+            raise OpenAIError('сервис вернул HTML вне таблицы')
         if not block['text'].strip() and not block['html'].strip():
             continue
         if '[неразборчиво]' in (block['text'] + block['html']).casefold():
@@ -268,7 +268,7 @@ class OpenAIDocumentVisionService:
     def _analyze_page(self, page: RenderedPage, deadline: float):
         if (type(page.page) is not int or page.page < 1 or page.width < 1 or page.height < 1
                 or not page.image.startswith(b'\x89PNG\r\n\x1a\n')):
-            raise OpenAIError('Некорректное изображение страницы для OpenAI')
+            raise OpenAIError('Некорректное изображение страницы для сервис')
         schema = dict(PAGE_SCHEMA, properties=dict(PAGE_SCHEMA['properties'],
                                                  page={'type': 'integer', 'enum': [page.page]}))
         messages = [
@@ -290,9 +290,9 @@ class OpenAIDocumentVisionService:
         if not pages:
             return VisionResult()
         if not vision_enabled():
-            return VisionResult(available=False, error='Распознавание OpenAI выключено настройкой VISION_ENABLED')
+            return VisionResult(available=False, error='Распознавание сервис выключено настройкой VISION_ENABLED')
         if not openai_configured():
-            return VisionResult(available=False, error='OpenAI API не настроен: укажите OPENAI_API_KEY в .env')
+            return VisionResult(available=False, error='Сервис распознавания не настроен: укажите OPENAI_API_KEY в .env')
         if len({page.page for page in pages}) != len(pages):
             return VisionResult(available=False, error='Повторяющиеся номера страниц документа')
         budget = float(DEADLINE if remaining is None else remaining)
@@ -311,7 +311,7 @@ class OpenAIDocumentVisionService:
                     output.append(result)
                     warnings.extend(page_warnings)
                 except (OpenAIError, ValueError, TypeError, KeyError) as error:
-                    description = str(error) if isinstance(error, OpenAIError) else 'Некорректный ответ распознавания OpenAI'
+                    description = str(error) if isinstance(error, OpenAIError) else 'Некорректный ответ распознавания сервис'
                     safe = f'Страница {page.page}: {description}'
                     errors.append(safe)
                     warnings.append(safe)

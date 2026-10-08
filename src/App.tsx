@@ -23,6 +23,33 @@ type Upload = {
   metadata: ExtractionMetadata;
   error?: string;
 };
+
+function ExtractionNotices({ uploads }: { uploads: Upload[] }) {
+  const groups = new Map<string, Set<string>>();
+  for (const { file, metadata } of uploads) {
+    for (const warning of metadata.warnings) {
+      const message = /ConnectError|не удалось связаться|UNEXPECTED_EOF/i.test(warning)
+        ? "Нет соединения с сервисом распознавания. Проверьте подключение и повторите загрузку."
+        : warning.replace(/\((?:ConnectTimeout|ReadTimeout|TimeoutException)\)/g, "").trim();
+      const files = groups.get(message) ?? new Set<string>();
+      files.add(file.name);
+      groups.set(message, files);
+    }
+  }
+  if (!groups.size) return null;
+  const notices = Array.from(groups);
+  return <section className="extraction-notices" aria-label="Замечания к обработке">
+    <strong>Требует внимания</strong>
+    <p className="notice-primary">{notices[0][0]}</p>
+    <details>
+      <summary>Подробнее о документах{notices.length > 1 ? ` · ${notices.length} замечаний` : ""}</summary>
+      <ul>{notices.map(([message, files]) => <li key={message}>
+        {notices.length > 1 && <p>{message}</p>}
+        <span>{Array.from(files).join(", ")}</span>
+      </li>)}</ul>
+    </details>
+  </section>;
+}
 function UsageDetails({ metadata }: { metadata: ExtractionMetadata }) {
   const usage = metadata.apiUsage;
   if (!usage) return <p className="validation-note">Расход API: статистика недоступна</p>;
@@ -30,7 +57,7 @@ function UsageDetails({ metadata }: { metadata: ExtractionMetadata }) {
   return <details className="validation-note">
     <summary>{metadata.cacheHit ? "Из кеша · новых токенов: 0 · стоимость сейчас: $0" :
       `Токены: ${(usage.inputTokens + usage.outputTokens).toLocaleString("ru-RU")} · стоимость API ≈ ${money(usage.estimatedCostUsd)}`}</summary>
-    <p>{metadata.cacheHit ? "Первоначальная обработка: " : ""}Вход: {usage.inputTokens.toLocaleString("ru-RU")} · из них кеш OpenAI: {usage.cachedInputTokens.toLocaleString("ru-RU")} · выход: {usage.outputTokens.toLocaleString("ru-RU")} · из них рассуждения: {usage.reasoningTokens.toLocaleString("ru-RU")}</p>
+    <p>{metadata.cacheHit ? "Первоначальная обработка: " : ""}Вход: {usage.inputTokens.toLocaleString("ru-RU")} · из них кеш API: {usage.cachedInputTokens.toLocaleString("ru-RU")} · выход: {usage.outputTokens.toLocaleString("ru-RU")} · из них рассуждения: {usage.reasoningTokens.toLocaleString("ru-RU")}</p>
     <p>Стоимость обработки ≈ {money(usage.estimatedCostUsd)} · тариф от {usage.pricingDate}, USD, без налогов и сервера.</p>
     {!usage.complete && <p>Учёт неполный: API не сообщил весь расход или тариф модели неизвестен. Итоговая стоимость не определена.</p>}
     {(["vision", "semantic"] as const).map(stage => {
@@ -273,14 +300,14 @@ function App() {
         if (!active) return;
         const openai = availableModels.find((model) => model.id === "openai");
         if (!openai) {
-          setModelsError("Сервер не поддерживает OpenAI API. Обновите backend.");
+          setModelsError("Сервис распознавания недоступен. Обновите сервер.");
           return;
         }
         setModels([openai]);
         setModelsError("");
       })
       .catch((cause) => {
-        if (active) setModelsError(cause instanceof Error ? cause.message : "Не удалось проверить настройки OpenAI API");
+        if (active) setModelsError(cause instanceof Error ? cause.message : "Не удалось проверить настройки распознавания");
       });
     return () => {
       active = false;
@@ -376,7 +403,7 @@ function App() {
               proposal: {},
               metadata: {
                 sourceName: file.name,
-                parser: "OpenAI API",
+                parser: "Распознавание документа",
                 status: "error",
                 confidence: 0,
                 warnings: [
@@ -782,7 +809,7 @@ function App() {
         {reading && (
           <div className="analysis">
             <div className="spinner" />
-            <h2>Чтение документов</h2>
+            <h2>Читаем документы</h2>
             <p>
               Готово {readProgress.done} из {readProgress.total}. До двух файлов
               обрабатываются одновременно; результат каждого сохраняется по мере
@@ -862,7 +889,7 @@ function App() {
                   {metadata.verification && (
                     <p className="validation-note">
                       {metadata.verification.mode === "model_error" ?
-                        "OpenAI API не смог извлечь данные"
+                        "Не удалось извлечь данные"
                       : `Охват товарных строк: ${metadata.verification.coverageComplete ? "все строки учтены" : `не проверено строк: ${metadata.verification.unclaimedRows.length}`} · визуальное чтение: ${metadata.verification.visionUsed ? "выполнено" : "не выполнялось"}`
                       }
                     </p>
@@ -870,20 +897,7 @@ function App() {
                 </div>
               ))}
             </div>
-            {uploads.some(({ metadata }) => metadata.warnings.length > 0) && (
-              <section className="validation-box">
-                <strong>Предупреждения извлечения</strong>
-                {uploads.map(({ file, metadata }) =>
-                  metadata.warnings.map((warning, index) => (
-                    <p
-                      className="validation-note"
-                      key={`${file.name}-${index}`}>
-                      {file.name}: {warning}
-                    </p>
-                  )),
-                )}
-              </section>
-            )}
+            <ExtractionNotices uploads={uploads} />
             {previewFile && (
               <SourcePreview
                 upload={
@@ -1144,9 +1158,9 @@ function OpenAIProvider({ model, error }: { model: ExtractionModel; error: strin
           <span className="step-label">ШАГ 1</span>
           <h2>Модель распознавания</h2>
           <p>
-            Модель читает текст, определяет смысл полей и строк таблиц.
-            Значения сверяются с источником. Если API недоступен, приложение
-            показывает ошибку и позволяет повторить чтение.
+            Читаем текст, определяем поля и строки таблиц.
+            Проверяем значения по источнику. Если обработка недоступна,
+            показываем ошибку и предлагаем повторить чтение.
           </p>
         </div>
       </div>
@@ -1161,7 +1175,7 @@ function OpenAIProvider({ model, error }: { model: ExtractionModel; error: strin
       {error && <p className="model-selection-note" role="alert">{error}</p>}
       {configured === false && (
         <p className="model-selection-note" role="alert">
-          Укажите OPENAI_API_KEY в настройках сервера и перезапустите backend.
+          Настройте ключ API на сервере и перезапустите сервис.
           Чтение документов недоступно, пока API не настроен.
         </p>
       )}
@@ -1219,11 +1233,7 @@ function SourcePreview({ upload }: { upload: Upload }) {
             "Текст документа недоступен. Проверьте предупреждения извлечения."}
         </pre>
       )}
-      {upload.metadata.warnings.map((warning) => (
-        <p className="validation-note" key={warning}>
-          {warning}
-        </p>
-      ))}
+      <ExtractionNotices uploads={[upload]} />
     </section>
   );
 }

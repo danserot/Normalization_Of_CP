@@ -94,7 +94,7 @@ async def lifespan(app):
     pipeline.stop()
 
 
-app = FastAPI(title="ReadDocument OpenAI extraction API", lifespan=lifespan)
+app = FastAPI(title="ReadDocument сервис extraction API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -213,10 +213,10 @@ async def extract(file: UploadFile = File(...), models: str = Form(default=""), 
             if json.loads(models) != ["openai"]:
                 raise ValueError()
         except (ValueError, TypeError):
-            raise HTTPException(status_code=422, detail="Доступен только OpenAI API")
+            raise HTTPException(status_code=422, detail="Доступен только Сервис распознавания")
     if not model_available():
         await file.close()
-        raise HTTPException(status_code=503, detail="OpenAI API не настроен. Задайте OPENAI_API_KEY в .env и перезапустите backend.")
+        raise HTTPException(status_code=503, detail="Сервис распознавания не настроен. Задайте OPENAI_API_KEY в .env и перезапустите backend.")
     try:
         content = await file.read(MAX_BYTES + 1)
         if len(content) > MAX_BYTES:
