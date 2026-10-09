@@ -40,6 +40,9 @@ def worker(connection):
                 result = process_document(content, filename)
             connection.send(('ok', result))
         except DocumentError as error:
+            if isinstance(error, ProviderError):
+                logging.getLogger(__name__).warning('document_provider_failure format=%s code=%s stage=%s',
+                    Path(filename).suffix.upper().lstrip('.'), error.code, error.stage)
             connection.send(('error', error.worker_payload() if isinstance(error, ProviderError) else str(error)))
         except Exception as error:
             suffix = Path(filename).suffix.upper().lstrip('.')

@@ -31,7 +31,7 @@ Python проверяет JSON, допустимость чисел и ариф�
 - `OPENAI_MODEL=gpt-5-mini`: модель для всего извлечения.
 - `OPENAI_PROXY_URL`: необязательный HTTP/HTTPS-прокси для запросов backend к API. В Docker используйте `host.docker.internal` вместо `localhost`, если прокси запущен на компьютере.
 - `MODEL_DOCUMENT_MAX_OUTPUT_TOKENS=24000`: лимит готового КП и транскрипции. Обрезанный ответ отклоняется.
-- `OPENAI_TIMEOUT_SECONDS=120`, `EXTRACTION_TIMEOUT_SECONDS=300`: deadlines.
+- `OPENAI_TIMEOUT_SECONDS=240`, `EXTRACTION_TIMEOUT_SECONDS=300`: deadlines. Небольшой ответ возвращается сразу; лимит даёт запас большим документам.
 - `EXTRACTION_WORKERS=3`, `EXTRACTION_QUEUE_LIMIT=8`: workers и очередь.
 - `MAX_FILE_SIZE_MB=25`: лимит оригинала.
 - `VISION_MAX_PAGES=50`: лимит кадров многокадровых изображений.

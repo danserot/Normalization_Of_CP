@@ -179,7 +179,7 @@ class OpenAIResponsesClient:
                 code='api_not_configured', http_status=503, stage='configuration')
         if not math.isfinite(remaining) or remaining <= 0:
             raise OpenAIError('Истекло время обработки документа перед запросом сервис')
-        budget = min(remaining, _number('OPENAI_TIMEOUT_SECONDS', 120., 1., 1800.))
+        budget = min(remaining, _number('OPENAI_TIMEOUT_SECONDS', 240., 1., 1800.))
         deadline = time.monotonic() + budget
         base_url = (os.getenv('OPENAI_API_URL', '').strip() or 'https://api.openai.com/v1').rstrip('/')
         endpoint = base_url if base_url.endswith('/responses') else base_url + '/responses'

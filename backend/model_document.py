@@ -1,5 +1,6 @@
 """Original file -> model-produced proposal. No native parsing or rule fallback."""
 from pathlib import Path
+from itertools import groupby
 import time
 
 from pydantic import ValidationError
@@ -58,6 +59,17 @@ def check_arithmetic(proposal):
     return warnings
 
 
+def transcription_text(cells):
+    """Format model transcription for display; never read the original file."""
+    def row_key(cell):
+        return cell['block'], cell['page'], cell['sheet'], cell['row'], cell['kind']
+    text = '\n'.join('\t'.join(cell['text'] for cell in row)
+                     for _, row in groupby(cells, key=row_key))
+    if len(text) > 500_000:
+        raise DocumentError('Транскрипция модели превышает допустимый размер')
+    return text
+
+
 def extract_model_document(content, filename, *, client=None):
     reset_usage()
     started = time.perf_counter()
@@ -80,6 +92,8 @@ def extract_model_document(content, filename, *, client=None):
     warnings = list(answer.warnings)
     cells = [dict(cell.model_dump(), file=filename, method='model-document',
                   source_method='model-document') for cell in answer.cells]
+    if not proposal['notes']:
+        proposal['notes'] = transcription_text(cells)
     by_id = {cell['id']: cell for cell in cells}
     if len(by_id) != len(cells):
         raise DocumentError('Модель вернула повторяющиеся ссылки на источник; повторите обработку')
